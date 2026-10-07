@@ -6,6 +6,9 @@ import urllib.request
 
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
+print("SUPABASE_URL exists:", bool(os.environ.get("SUPABASE_URL")))
+print("SUPABASE_KEY exists:", bool(os.environ.get("SUPABASE_KEY")))
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
