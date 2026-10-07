@@ -5,8 +5,8 @@ import urllib.request
 
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
-SUPABASE_URL = "https://你的-project.supabase.co"
-SUPABASE_KEY = "你的-key"
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 
 def supabase_request(method, path, data=None, params=None):
