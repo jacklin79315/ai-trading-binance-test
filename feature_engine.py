@@ -1909,6 +1909,8 @@ def process_symbol_timeframe(
         )
     )
 
+    if not FORCE_HISTORICAL_BACKFILL:
+
     if latest_timestamp is not None:
 
         features = [
