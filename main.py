@@ -142,8 +142,6 @@ def main():
             "close_time": k[6],
             "quote_volume": k[7],
             "trade_count": k[8],
-            "taker_buy_base_volume": k[9],
-            "taker_buy_quote_volume": k[10],
         })
 
     print("Prepared candles:", len(candles))
