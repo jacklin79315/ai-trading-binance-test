@@ -795,8 +795,115 @@ def atr_series(
 # =========================================================
 
 def macd_series(
-    closes,
+    values,
+    fast_period=12,
+    slow_period=26,
+    signal_period=9,
 ):
+    """
+    Calculate MACD without allowing leading None values
+    to break the signal EMA.
+
+    Returns:
+        macd
+        signal
+        histogram
+    """
+
+    count = len(values)
+
+    fast_ema = ema_series(
+        values,
+        fast_period,
+    )
+
+    slow_ema = ema_series(
+        values,
+        slow_period,
+    )
+
+    macd = [
+        None
+        for _ in range(count)
+    ]
+
+    for i in range(count):
+
+        if (
+            fast_ema[i] is None
+            or slow_ema[i] is None
+        ):
+            continue
+
+        macd[i] = (
+            fast_ema[i]
+            - slow_ema[i]
+        )
+
+    # -----------------------------------------------------
+    # Build compact MACD series for signal EMA
+    # -----------------------------------------------------
+
+    valid_macd = []
+
+    valid_indexes = []
+
+    for i in range(count):
+
+        if macd[i] is not None:
+
+            valid_macd.append(
+                macd[i]
+            )
+
+            valid_indexes.append(i)
+
+    signal_compact = ema_series(
+        valid_macd,
+        signal_period,
+    )
+
+    signal = [
+        None
+        for _ in range(count)
+    ]
+
+    for j, index in enumerate(
+        valid_indexes
+    ):
+
+        if (
+            signal_compact[j]
+            is not None
+        ):
+
+            signal[index] = (
+                signal_compact[j]
+            )
+
+    histogram = [
+        None
+        for _ in range(count)
+    ]
+
+    for i in range(count):
+
+        if (
+            macd[i] is None
+            or signal[i] is None
+        ):
+            continue
+
+        histogram[i] = (
+            macd[i]
+            - signal[i]
+        )
+
+    return (
+        macd,
+        signal,
+        histogram,
+    )
 
     ema12 = ema_series(
         closes,
@@ -1377,7 +1484,7 @@ def calculate_features(
         macd,
         macd_signal,
         macd_histogram,
-    ) = calculate_macd(
+    ) = macd_series(
         closes
     )
 
