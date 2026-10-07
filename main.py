@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 import os
 import urllib.parse
@@ -131,17 +132,23 @@ def main():
 
     for k in klines:
         candles.append({
-            "symbol_id": symbol_id,
-            "timeframe": "5m",
-            "open_time": k[0],
-            "open": k[1],
-            "high": k[2],
-            "low": k[3],
-            "close": k[4],
-            "volume": k[5],
-            "close_time": k[6],
-            "quote_volume": k[7],
-            "trade_count": k[8],
+           "symbol_id": symbol_id,
+           "timeframe": "5m",
+           "open_time": datetime.fromtimestamp(
+               k[0] / 1000,
+               tz=timezone.utc
+            ).isoformat(),
+           "open": k[1],
+           "high": k[2],
+           "low": k[3],
+           "close": k[4],
+           "volume": k[5],
+           "close_time": datetime.fromtimestamp(
+              k[6] / 1000,
+             tz=timezone.utc
+            ).isoformat(),
+           "quote_volume": k[7],
+           "trade_count": k[8],
         })
 
     print("Prepared candles:", len(candles))
