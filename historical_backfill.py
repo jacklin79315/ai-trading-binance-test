@@ -698,7 +698,7 @@ if __name__ == "__main__":
         if x["symbol"] == "BTCUSDT"
     ][0]
 
-    repair_gaps(
+    backfill_one(
         btc["symbol"],
         btc["id"],
         "5m",
