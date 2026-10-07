@@ -1485,7 +1485,10 @@ def calculate_features(
     # -----------------------------------------------------
 
     features = []
-
+    print(
+    f"Building feature rows: "
+    f"{len(closed)} candles"
+    )
     for i, candle in enumerate(
         closed
     ):
@@ -1788,25 +1791,28 @@ def calculate_features(
         # ATR changes
         # ---------------------------------------------
 
-        atr_change = change_value(
-            atr,
-            i,
-        )
+        atr_percent_change = None
 
+if i >= 1:
+    current_atr_percent = ratio(
+        atr[i],
+        closes[i],
+    )
+
+    previous_atr_percent = ratio(
+        atr[i - 1],
+        closes[i - 1],
+    )
+
+    if (
+        current_atr_percent is not None
+        and previous_atr_percent is not None
+        and previous_atr_percent != 0
+    ):
         atr_percent_change = (
-            change_value(
-                [
-                    ratio(
-                        atr[j],
-                        closes[j],
-                    )
-                    for j in range(
-                        len(closes)
-                    )
-                ],
-                i,
-            )
-        )
+            current_atr_percent
+            - previous_atr_percent
+        ) / abs(previous_atr_percent)
 
         atr_to_atr_ma20 = ratio(
             atr[i],
