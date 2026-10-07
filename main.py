@@ -118,7 +118,7 @@ def main():
                 "base_asset": "BTC",
                 "quote_asset": "USDT",
                 "market_type": market_type,
-                "status": "active",
+                "status": "TRADING",
             },
         )
 
