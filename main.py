@@ -14,7 +14,6 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 
-```python
 def supabase_request(method, path, data=None, params=None):
     url = SUPABASE_URL.rstrip("/") + "/rest/v1/" + path
 
