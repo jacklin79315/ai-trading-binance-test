@@ -253,7 +253,208 @@ def convert_kline(kline, symbol_id, timeframe):
         "trade_count": int(kline[8]),
     }
 
+def get_all_open_times(symbol_id, timeframe):
 
+    all_rows = []
+    page_size = 1000
+    offset = 0
+
+    while True:
+
+        rows = supabase_get(
+            "candles",
+            {
+                "select": "open_time",
+                "symbol_id": f"eq.{symbol_id}",
+                "timeframe": f"eq.{timeframe}",
+                "order": "open_time.asc",
+                "limit": page_size,
+                "offset": offset,
+            },
+        )
+
+        if not rows:
+            break
+
+        all_rows.extend(rows)
+
+        if len(rows) < page_size:
+            break
+
+        offset += page_size
+
+    return [
+        iso_to_ms(row["open_time"])
+        for row in all_rows
+    ]
+
+
+def repair_gaps(
+    symbol,
+    symbol_id,
+    timeframe,
+):
+
+    print()
+    print("=" * 60)
+    print(
+        f"GAP REPAIR: {symbol} - {timeframe}"
+    )
+    print("=" * 60)
+
+    interval = INTERVAL_MS[timeframe]
+
+    open_times = get_all_open_times(
+        symbol_id,
+        timeframe,
+    )
+
+    if len(open_times) < 2:
+
+        print(
+            "Not enough candles to check gaps."
+        )
+
+        return 0
+
+    open_times.sort()
+
+    gaps = []
+
+    for i in range(1, len(open_times)):
+
+        previous = open_times[i - 1]
+        current = open_times[i]
+
+        difference = current - previous
+
+        if difference != interval:
+
+            missing_count = (
+                difference // interval
+            ) - 1
+
+            if missing_count > 0:
+
+                gaps.append(
+                    (
+                        previous + interval,
+                        current - interval,
+                        missing_count,
+                    )
+                )
+
+    print(
+        f"Existing candles: "
+        f"{len(open_times)}"
+    )
+
+    print(
+        f"Gaps found: "
+        f"{len(gaps)}"
+    )
+
+    if not gaps:
+
+        print(
+            "No gaps found."
+        )
+
+        return 0
+
+    total_repaired = 0
+
+    for (
+        gap_start,
+        gap_end,
+        missing_count,
+    ) in gaps:
+
+        print()
+        print(
+            f"Gap detected: "
+            f"{ms_to_iso(gap_start)}"
+            f" -> "
+            f"{ms_to_iso(gap_end)}"
+        )
+
+        print(
+            f"Missing candles: "
+            f"{missing_count}"
+        )
+
+        try:
+
+            klines = fetch_binance_klines(
+                symbol,
+                timeframe,
+                gap_start,
+                gap_end,
+            )
+
+        except Exception as e:
+
+            print(
+                f"Binance request error: {e}"
+            )
+
+            continue
+
+        if not klines:
+
+            print(
+                "Binance returned no data."
+            )
+
+            continue
+
+        rows = []
+
+        for kline in klines:
+
+            open_ms = kline[0]
+
+            if (
+                open_ms >= gap_start
+                and open_ms <= gap_end
+            ):
+
+                rows.append(
+                    convert_kline(
+                        kline,
+                        symbol_id,
+                        timeframe,
+                    )
+                )
+
+        if not rows:
+
+            print(
+                "No valid rows to repair."
+            )
+
+            continue
+
+        inserted = supabase_insert_candles(
+            rows
+        )
+
+        total_repaired += inserted
+
+        print(
+            f"Repaired: "
+            f"{inserted} candle(s)"
+        )
+
+        time.sleep(0.15)
+
+    print()
+    print(
+        f"Gap repair completed: "
+        f"{total_repaired} candle(s)"
+    )
+
+    return total_repaired
 def backfill_one(
     symbol,
     symbol_id,
@@ -489,105 +690,16 @@ def main():
 
 if __name__ == "__main__":
 
-    print("=" * 60)
-    print("BINANCE RAW KLINE CHECK")
-    print("=" * 60)
+    symbols = get_active_symbols()
 
-    symbol = "BTCUSDT"
-    timeframe = "5m"
+    btc = [
+        x
+        for x in symbols
+        if x["symbol"] == "BTCUSDT"
+    ][0]
 
-    # 2026-10-04 02:10:00 UTC
-    target_time = datetime(
-        2026,
-        10,
-        4,
-        2,
-        10,
-        tzinfo=timezone.utc,
+    repair_gaps(
+        btc["symbol"],
+        btc["id"],
+        "5m",
     )
-
-    start_ms = int(
-        target_time.timestamp() * 1000
-    )
-
-    # 只查這一根 K
-    end_ms = (
-        start_ms
-        + INTERVAL_MS[timeframe]
-        - 1
-    )
-
-    print(
-        f"Symbol    : {symbol}"
-    )
-
-    print(
-        f"Timeframe : {timeframe}"
-    )
-
-    print(
-        f"Target    : {target_time.isoformat()}"
-    )
-
-    print()
-    print("Requesting Binance...")
-    print()
-
-    klines = fetch_binance_klines(
-        symbol,
-        timeframe,
-        start_ms,
-        end_ms,
-    )
-
-    print(
-        f"Binance returned: "
-        f"{len(klines)} candle(s)"
-    )
-
-    print()
-
-    if not klines:
-
-        print(
-            "RESULT: Binance returned NO candle."
-        )
-
-    else:
-
-        for kline in klines:
-
-            print("=" * 60)
-            print("RAW BINANCE KLINE")
-            print("=" * 60)
-
-            print(
-                json.dumps(
-                    kline,
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            )
-
-            print()
-
-            print(
-                "Open time:",
-                datetime.fromtimestamp(
-                    kline[0] / 1000,
-                    tz=timezone.utc,
-                ).isoformat(),
-            )
-
-            print(
-                "Close time:",
-                datetime.fromtimestamp(
-                    kline[6] / 1000,
-                    tz=timezone.utc,
-                ).isoformat(),
-            )
-
-    print()
-    print("=" * 60)
-    print("CHECK COMPLETE")
-    print("=" * 60)
