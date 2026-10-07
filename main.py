@@ -15,7 +15,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
-SYMBOL = "BTCUSDT"
 EXCHANGE = "binance"
 MARKET_TYPE = "spot"
 
@@ -35,6 +34,7 @@ KLINE_LIMIT = 1000
 # ==========================================
 
 def supabase_request(method, endpoint, data=None):
+
     url = f"{SUPABASE_URL}/rest/v1/{endpoint}"
 
     headers = {
@@ -43,8 +43,6 @@ def supabase_request(method, endpoint, data=None):
         "Content-Type": "application/json",
     }
 
-    # 不再依賴 ignore-duplicates。
-    # 我們會在寫入前先查詢最新資料，真正做到增量更新。
     if method == "POST":
         headers["Prefer"] = "return=representation"
 
@@ -61,12 +59,15 @@ def supabase_request(method, endpoint, data=None):
     )
 
     try:
+
         with urllib.request.urlopen(
             request,
             timeout=30
         ) as response:
 
-            response_body = response.read().decode("utf-8")
+            response_body = response.read().decode(
+                "utf-8"
+            )
 
             if not response_body:
                 return []
@@ -74,13 +75,21 @@ def supabase_request(method, endpoint, data=None):
             return json.loads(response_body)
 
     except urllib.error.HTTPError as e:
+
         error_body = e.read().decode(
             "utf-8",
             errors="replace"
         )
 
-        print("Supabase HTTP Error:", e.code)
-        print("Supabase response:", error_body)
+        print(
+            "Supabase HTTP Error:",
+            e.code
+        )
+
+        print(
+            "Supabase response:",
+            error_body
+        )
 
         raise
 
@@ -95,6 +104,7 @@ def get_binance_klines(
     limit=1000,
     start_time=None
 ):
+
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -102,6 +112,7 @@ def get_binance_klines(
     }
 
     if start_time is not None:
+
         params["startTime"] = start_time
 
     query = urllib.parse.urlencode(params)
@@ -116,23 +127,34 @@ def get_binance_klines(
     )
 
     try:
+
         with urllib.request.urlopen(
             request,
             timeout=30
         ) as response:
 
-            data = response.read().decode("utf-8")
+            data = response.read().decode(
+                "utf-8"
+            )
 
             return json.loads(data)
 
     except urllib.error.HTTPError as e:
+
         error_body = e.read().decode(
             "utf-8",
             errors="replace"
         )
 
-        print("Binance HTTP Error:", e.code)
-        print("Binance response:", error_body)
+        print(
+            "Binance HTTP Error:",
+            e.code
+        )
+
+        print(
+            "Binance response:",
+            error_body
+        )
 
         raise
 
@@ -142,6 +164,7 @@ def get_binance_klines(
 # ==========================================
 
 def timestamp_to_iso(timestamp_ms):
+
     return datetime.fromtimestamp(
         timestamp_ms / 1000,
         tz=timezone.utc
@@ -149,16 +172,16 @@ def timestamp_to_iso(timestamp_ms):
 
 
 # ==========================================
-# Get or Create Symbol
+# Get Active Symbols
 # ==========================================
 
-def get_or_create_symbol():
+def get_active_symbols():
 
     params = urllib.parse.urlencode({
         "exchange": f"eq.{EXCHANGE}",
-        "symbol": f"eq.{SYMBOL}",
         "market_type": f"eq.{MARKET_TYPE}",
-        "limit": "1",
+        "status": "eq.TRADING",
+        "order": "symbol.asc",
     })
 
     result = supabase_request(
@@ -166,39 +189,7 @@ def get_or_create_symbol():
         f"symbols?{params}"
     )
 
-    if result:
-        symbol_id = result[0]["id"]
-
-        print(
-            f"Existing symbol ID: {symbol_id}"
-        )
-
-        return symbol_id
-
-    print("Symbol does not exist. Creating...")
-
-    symbol_data = {
-        "exchange": EXCHANGE,
-        "symbol": SYMBOL,
-        "base_asset": "BTC",
-        "quote_asset": "USDT",
-        "market_type": MARKET_TYPE,
-        "status": "TRADING",
-    }
-
-    result = supabase_request(
-        "POST",
-        "symbols",
-        data=symbol_data
-    )
-
-    symbol_id = result[0]["id"]
-
-    print(
-        f"Created symbol ID: {symbol_id}"
-    )
-
-    return symbol_id
+    return result
 
 
 # ==========================================
@@ -223,6 +214,7 @@ def get_latest_candle_time(
     )
 
     if not result:
+
         return None
 
     return result[0]["open_time"]
@@ -274,6 +266,7 @@ def prepare_candles(
 def save_candles(candles):
 
     if not candles:
+
         return []
 
     result = supabase_request(
@@ -283,6 +276,125 @@ def save_candles(candles):
     )
 
     return result
+
+
+# ==========================================
+# Collect One Symbol
+# ==========================================
+
+def collect_symbol(symbol_record):
+
+    symbol_id = symbol_record["id"]
+    symbol = symbol_record["symbol"]
+
+    print()
+    print("====================================")
+    print(
+        f"Symbol: {symbol}"
+    )
+    print(
+        f"Symbol ID: {symbol_id}"
+    )
+    print("====================================")
+
+    for timeframe in TIMEFRAMES:
+
+        print("------------------------------------")
+
+        print(
+            f"{symbol} - Timeframe: "
+            f"{timeframe}"
+        )
+
+        latest_open_time = (
+            get_latest_candle_time(
+                symbol_id,
+                timeframe
+            )
+        )
+
+        if latest_open_time:
+
+            print(
+                "Latest candle in Supabase:",
+                latest_open_time
+            )
+
+            latest_dt = datetime.fromisoformat(
+                latest_open_time.replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+            start_time = int(
+                latest_dt.timestamp() * 1000
+            ) + 1
+
+            print(
+                "Fetching only new candles..."
+            )
+
+            rows = get_binance_klines(
+                symbol,
+                timeframe,
+                limit=KLINE_LIMIT,
+                start_time=start_time
+            )
+
+        else:
+
+            print(
+                "No existing candles."
+            )
+
+            print(
+                "Fetching initial "
+                "1000 candles..."
+            )
+
+            rows = get_binance_klines(
+                symbol,
+                timeframe,
+                limit=KLINE_LIMIT
+            )
+
+        print(
+            f"Binance rows: {len(rows)}"
+        )
+
+        if not rows:
+
+            print(
+                "No new candles."
+            )
+
+            continue
+
+        candles = prepare_candles(
+            symbol_id,
+            timeframe,
+            rows
+        )
+
+        print(
+            f"Prepared candles: "
+            f"{len(candles)}"
+        )
+
+        print(
+            f"Writing {len(candles)} "
+            "candles to Supabase..."
+        )
+
+        inserted = save_candles(
+            candles
+        )
+
+        print(
+            f"SUCCESS - Inserted rows: "
+            f"{len(inserted)}"
+        )
 
 
 # ==========================================
@@ -306,157 +418,65 @@ def main():
     )
 
     if not SUPABASE_URL:
+
         raise RuntimeError(
             "SUPABASE_URL is not configured."
         )
 
     if not SUPABASE_KEY:
+
         raise RuntimeError(
             "SUPABASE_KEY is not configured."
         )
 
-    print("Checking Supabase symbols...")
-
-    # --------------------------------------
-    # 重要：
-    # symbol_id 必須先取得
-    # --------------------------------------
-
-    symbol_id = get_or_create_symbol()
-
     print(
-        f"Using symbol ID: {symbol_id}"
+        "Loading active symbols "
+        "from Supabase..."
     )
 
-    # --------------------------------------
-    # Process every timeframe
-    # --------------------------------------
+    symbols = get_active_symbols()
 
-    for timeframe in TIMEFRAMES:
+    if not symbols:
 
-        print("------------------------------------")
-        print(f"Timeframe: {timeframe}")
-
-        # ----------------------------------
-        # 查詢 Supabase 最新資料
-        # ----------------------------------
-
-        latest_open_time = get_latest_candle_time(
-            symbol_id,
-            timeframe
+        raise RuntimeError(
+            "No active symbols found."
         )
 
-        # ----------------------------------
-        # 已經有資料
-        # ----------------------------------
+    print(
+        f"Active symbols: "
+        f"{len(symbols)}"
+    )
 
-        if latest_open_time:
+    for symbol_record in symbols:
+
+        try:
+
+            collect_symbol(
+                symbol_record
+            )
+
+        except Exception as e:
+
+            symbol = symbol_record["symbol"]
 
             print(
-                "Latest candle in Supabase:",
-                latest_open_time
-            )
-
-            latest_dt = datetime.fromisoformat(
-                latest_open_time.replace(
-                    "Z",
-                    "+00:00"
-                )
-            )
-
-            # 從最新 K 線之後開始抓
-            start_time = int(
-                latest_dt.timestamp() * 1000
-            ) + 1
-
-            print(
-                "Fetching only new candles..."
-            )
-
-            rows = get_binance_klines(
-                SYMBOL,
-                timeframe,
-                limit=KLINE_LIMIT,
-                start_time=start_time
-            )
-
-        # ----------------------------------
-        # 完全沒有資料
-        # ----------------------------------
-
-        else:
-
-            print(
-                "No existing candles."
+                f"ERROR collecting "
+                f"{symbol}: {e}"
             )
 
             print(
-                "Fetching initial 1000 candles..."
+                "Continuing with "
+                "next symbol..."
             )
 
-            rows = get_binance_klines(
-                SYMBOL,
-                timeframe,
-                limit=KLINE_LIMIT
-            )
-
-        # ----------------------------------
-        # Binance 結果
-        # ----------------------------------
-
-        print(
-            f"Binance rows: {len(rows)}"
-        )
-
-        # 沒有新的資料
-        if not rows:
-
-            print(
-                "No new candles."
-            )
-
-            continue
-
-        # ----------------------------------
-        # 整理資料
-        # ----------------------------------
-
-        candles = prepare_candles(
-            symbol_id,
-            timeframe,
-            rows
-        )
-
-        print(
-            f"Prepared candles: {len(candles)}"
-        )
-
-        # ----------------------------------
-        # 寫入 Supabase
-        # ----------------------------------
-
-        print(
-            f"Writing {len(candles)} "
-            "candles to Supabase..."
-        )
-
-        inserted = save_candles(
-            candles
-        )
-
-        print(
-            f"SUCCESS - Inserted rows: "
-            f"{len(inserted)}"
-        )
-
+    print()
     print("------------------------------------")
-    print("Data collection completed.")
+    print(
+        "Data collection completed."
+    )
     print("====================================")
 
 
-# ==========================================
-# Entry Point
-# ==========================================
-
 if __name__ == "__main__":
+
     main()
