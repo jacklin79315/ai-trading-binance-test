@@ -488,15 +488,106 @@ def main():
 
 
 if __name__ == "__main__":
-    symbols = get_active_symbols()
 
-    btc = [
-        x for x in symbols
-        if x["symbol"] == "BTCUSDT"
-    ][0]
+    print("=" * 60)
+    print("BINANCE RAW KLINE CHECK")
+    print("=" * 60)
 
-    backfill_one(
-        btc["symbol"],
-        btc["id"],
-        "5m",
+    symbol = "BTCUSDT"
+    timeframe = "5m"
+
+    # 2026-10-04 02:10:00 UTC
+    target_time = datetime(
+        2026,
+        10,
+        4,
+        2,
+        10,
+        tzinfo=timezone.utc,
     )
+
+    start_ms = int(
+        target_time.timestamp() * 1000
+    )
+
+    # 只查這一根 K
+    end_ms = (
+        start_ms
+        + INTERVAL_MS[timeframe]
+        - 1
+    )
+
+    print(
+        f"Symbol    : {symbol}"
+    )
+
+    print(
+        f"Timeframe : {timeframe}"
+    )
+
+    print(
+        f"Target    : {target_time.isoformat()}"
+    )
+
+    print()
+    print("Requesting Binance...")
+    print()
+
+    klines = fetch_binance_klines(
+        symbol,
+        timeframe,
+        start_ms,
+        end_ms,
+    )
+
+    print(
+        f"Binance returned: "
+        f"{len(klines)} candle(s)"
+    )
+
+    print()
+
+    if not klines:
+
+        print(
+            "RESULT: Binance returned NO candle."
+        )
+
+    else:
+
+        for kline in klines:
+
+            print("=" * 60)
+            print("RAW BINANCE KLINE")
+            print("=" * 60)
+
+            print(
+                json.dumps(
+                    kline,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+
+            print()
+
+            print(
+                "Open time:",
+                datetime.fromtimestamp(
+                    kline[0] / 1000,
+                    tz=timezone.utc,
+                ).isoformat(),
+            )
+
+            print(
+                "Close time:",
+                datetime.fromtimestamp(
+                    kline[6] / 1000,
+                    tz=timezone.utc,
+                ).isoformat(),
+            )
+
+    print()
+    print("=" * 60)
+    print("CHECK COMPLETE")
+    print("=" * 60)
