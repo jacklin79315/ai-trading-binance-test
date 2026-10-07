@@ -1,18 +1,30 @@
-from datetime import datetime, timezone
 import json
 import os
 import urllib.parse
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 
 
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
-print("SUPABASE_URL exists:", bool(os.environ.get("SUPABASE_URL")))
-print("SUPABASE_KEY exists:", bool(os.environ.get("SUPABASE_KEY")))
-
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+
+
+SYMBOL = "BTCUSDT"
+EXCHANGE = "binance"
+MARKET_TYPE = "spot"
+
+TIMEFRAMES = [
+    "5m",
+    "15m",
+    "1h",
+    "4h",
+    "1d",
+]
+
+KLINE_LIMIT = 1000
 
 
 def supabase_request(method, path, data=None, params=None):
@@ -31,6 +43,7 @@ def supabase_request(method, path, data=None, params=None):
         headers["Prefer"] = "return=representation"
 
     body = None
+
     if data is not None:
         body = json.dumps(data).encode("utf-8")
 
@@ -42,7 +55,7 @@ def supabase_request(method, path, data=None, params=None):
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             response_body = response.read().decode("utf-8")
 
             if response_body:
@@ -59,35 +72,29 @@ def supabase_request(method, path, data=None, params=None):
         raise
 
 
-
-
-def get_binance_klines():
+def get_binance_klines(symbol, timeframe, limit=1000):
     params = {
-        "symbol": "BTCUSDT",
-        "interval": "5m",
-        "limit": 1000,
+        "symbol": symbol,
+        "interval": timeframe,
+        "limit": limit,
     }
 
     url = BINANCE_URL + "?" + urllib.parse.urlencode(params)
 
-    print("Fetching Binance data...")
+    print(f"Fetching Binance {symbol} {timeframe}...")
 
-    with urllib.request.urlopen(url, timeout=20) as response:
+    with urllib.request.urlopen(url, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def main():
+def timestamp_to_iso(timestamp_ms):
+    return datetime.fromtimestamp(
+        timestamp_ms / 1000,
+        tz=timezone.utc
+    ).isoformat()
 
-    symbol = "BTCUSDT"
-    exchange = "binance"
-    market_type = "spot"
 
-    # 1. 取得 Binance K 線
-    klines = get_binance_klines()
-
-    print("Binance rows:", len(klines))
-
-    # 2. 查詢 Supabase 是否已經有 BTCUSDT
+def get_or_create_symbol():
     print("Checking Supabase symbols...")
 
     existing = supabase_request(
@@ -95,66 +102,71 @@ def main():
         "symbols",
         params={
             "select": "*",
-            "symbol": f"eq.{symbol}",
-            "exchange": f"eq.{exchange}",
-            "market_type": f"eq.{market_type}",
+            "symbol": f"eq.{SYMBOL}",
+            "exchange": f"eq.{EXCHANGE}",
+            "market_type": f"eq.{MARKET_TYPE}",
             "limit": "1",
         },
     )
 
-    # 3. 如果沒有 BTCUSDT，就建立
     if existing:
         symbol_id = existing[0]["id"]
         print("Existing symbol ID:", symbol_id)
+        return symbol_id
 
-    else:
-        print("Creating BTCUSDT symbol...")
+    print("Creating BTCUSDT symbol...")
 
-        new_symbol = supabase_request(
-            "POST",
-            "symbols",
-            data={
-                "exchange": exchange,
-                "symbol": symbol,
-                "base_asset": "BTC",
-                "quote_asset": "USDT",
-                "market_type": market_type,
-                "status": "TRADING",
-            },
-        )
+    new_symbol = supabase_request(
+        "POST",
+        "symbols",
+        data={
+            "exchange": EXCHANGE,
+            "symbol": SYMBOL,
+            "base_asset": "BTC",
+            "quote_asset": "USDT",
+            "market_type": MARKET_TYPE,
+            "status": "TRADING",
+        },
+    )
 
-        symbol_id = new_symbol[0]["id"]
+    symbol_id = new_symbol[0]["id"]
 
-        print("Created symbol ID:", symbol_id)
+    print("Created symbol ID:", symbol_id)
 
-    # 4. 把 Binance 格式轉成 Supabase candles 格式
+    return symbol_id
+
+
+def prepare_candles(symbol_id, timeframe, klines):
     candles = []
 
     for k in klines:
         candles.append({
-           "symbol_id": symbol_id,
-           "timeframe": "5m",
-           "open_time": datetime.fromtimestamp(
-               k[0] / 1000,
-               tz=timezone.utc
-            ).isoformat(),
-           "open": k[1],
-           "high": k[2],
-           "low": k[3],
-           "close": k[4],
-           "volume": k[5],
-           "close_time": datetime.fromtimestamp(
-              k[6] / 1000,
-             tz=timezone.utc
-            ).isoformat(),
-           "quote_volume": k[7],
-           "trade_count": k[8],
+            "symbol_id": symbol_id,
+            "timeframe": timeframe,
+
+            "open_time": timestamp_to_iso(k[0]),
+
+            "open": k[1],
+            "high": k[2],
+            "low": k[3],
+            "close": k[4],
+
+            "volume": k[5],
+
+            "close_time": timestamp_to_iso(k[6]),
+
+            "quote_volume": k[7],
+            "trade_count": k[8],
         })
 
-    print("Prepared candles:", len(candles))
+    return candles
 
-    # 5. 寫入 Supabase
-    print("Writing candles to Supabase...")
+
+def save_candles(candles):
+    if not candles:
+        return 0
+
+    print(f"Writing {len(candles)} candles to Supabase...")
 
     result = supabase_request(
         "POST",
@@ -162,8 +174,52 @@ def main():
         data=candles,
     )
 
-    print("SUCCESS")
-    print("Inserted rows:", len(result) if result else 0)
+    return len(result) if result else 0
+
+
+def main():
+    print("====================================")
+    print("AI Trading System - Data Collector")
+    print("====================================")
+
+    print("SUPABASE_URL exists:", bool(os.environ.get("SUPABASE_URL")))
+    print("SUPABASE_KEY exists:", bool(os.environ.get("SUPABASE_KEY")))
+
+    symbol_id = get_or_create_symbol()
+
+    total_inserted = 0
+
+    for timeframe in TIMEFRAMES:
+
+        print("------------------------------------")
+        print("Timeframe:", timeframe)
+
+        klines = get_binance_klines(
+            SYMBOL,
+            timeframe,
+            KLINE_LIMIT,
+        )
+
+        print("Binance rows:", len(klines))
+
+        candles = prepare_candles(
+            symbol_id,
+            timeframe,
+            klines,
+        )
+
+        print("Prepared candles:", len(candles))
+
+        inserted = save_candles(candles)
+
+        print("Inserted rows:", inserted)
+
+        total_inserted += inserted
+
+    print("====================================")
+    print("Collector finished")
+    print("Total inserted:", total_inserted)
+    print("====================================")
 
 
 if __name__ == "__main__":
