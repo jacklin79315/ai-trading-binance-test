@@ -14,6 +14,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 
+```python
 def supabase_request(method, path, data=None, params=None):
     url = SUPABASE_URL.rstrip("/") + "/rest/v1/" + path
 
@@ -30,7 +31,6 @@ def supabase_request(method, path, data=None, params=None):
         headers["Prefer"] = "return=representation"
 
     body = None
-
     if data is not None:
         body = json.dumps(data).encode("utf-8")
 
@@ -42,17 +42,23 @@ def supabase_request(method, path, data=None, params=None):
     )
 
     try:
-    with urllib.request.urlopen(request, timeout=20) as response:
-        response_body = response.read().decode("utf-8")
-        if response_body:
-            return json.loads(response_body)
-        return None
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read().decode("utf-8")
 
-except urllib.error.HTTPError as e:
-    error_body = e.read().decode("utf-8", errors="replace")
-    print("Supabase HTTP Error:", e.code)
-    print("Supabase response:", error_body)
-    raise
+            if response_body:
+                return json.loads(response_body)
+
+            return None
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+
+        print("Supabase HTTP Error:", e.code)
+        print("Supabase response:", error_body)
+
+        raise
+
+
 
 
 def get_binance_klines():
