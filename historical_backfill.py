@@ -76,14 +76,46 @@ def supabase_insert_candles(rows):
     request = Request(
         url,
         headers=headers,
-        data=json.dumps(rows).encode(),
+        data=json.dumps(rows).encode("utf-8"),
         method="POST",
     )
 
-    with urlopen(request, timeout=60) as response:
-        response.read()
+    try:
+        with urlopen(request, timeout=60) as response:
+            response.read()
 
-    return len(rows)
+        return len(rows)
+
+    except Exception as e:
+
+        print()
+        print("=" * 60)
+        print("SUPABASE INSERT ERROR")
+        print("=" * 60)
+
+        print("Exception:", repr(e))
+
+        if hasattr(e, "read"):
+            try:
+                body = e.read().decode("utf-8")
+                print("Response:", body)
+            except Exception as read_error:
+                print(
+                    "Could not read error body:",
+                    repr(read_error)
+                )
+
+        print()
+        print("First row being inserted:")
+        print(json.dumps(
+            rows[0],
+            indent=2,
+            ensure_ascii=False
+        ))
+
+        print("=" * 60)
+
+        raise
 
 
 def get_active_symbols():
