@@ -1,38 +1,44 @@
 import json
 import urllib.parse
 import urllib.request
+import time
 
 
 BASE_URL = "https://data-api.binance.vision/api/v3/klines"
 
-params = {
-    "symbol": "BTCUSDT",
-    "interval": "5m",
-    "limit": 1000,
-}
+symbol = "BTCUSDT"
+intervals = ["5m", "15m", "1h", "4h", "1d"]
 
-url = BASE_URL + "?" + urllib.parse.urlencode(params)
+for interval in intervals:
 
-print("Fetching Binance Kline data...")
-print("URL:", url)
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": 1000,
+    }
 
-try:
-    with urllib.request.urlopen(url, timeout=20) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    url = BASE_URL + "?" + urllib.parse.urlencode(params)
 
-    print("\nSUCCESS")
-    print("Rows:", len(data))
+    print("\n" + "=" * 50)
+    print("Interval:", interval)
+    print("Fetching:", url)
 
-    if data:
-        print("\nFirst candle:")
-        print(data[0])
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
 
-        print("\nLast candle:")
-        print(data[-1])
+        print("SUCCESS")
+        print("Rows:", len(data))
 
-        print("\nLatest close price:")
-        print(data[-1][4])
+        if data:
+            print("First open time:", data[0][0])
+            print("Last open time:", data[-1][0])
+            print("Latest close:", data[-1][4])
+            print("Latest volume:", data[-1][5])
+            print("Latest trade count:", data[-1][8])
 
-except Exception as e:
-    print("\nFAILED")
-    print("Error:", repr(e))
+    except Exception as e:
+        print("FAILED")
+        print("Error:", repr(e))
+
+    time.sleep(0.5)
