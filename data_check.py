@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-SYMBOL = "BTCUSDT"
+EXCHANGE = "binance"
+MARKET_TYPE = "spot"
 
 TIMEFRAMES = {
     "5m": 5,
@@ -45,6 +46,7 @@ def supabase_request(endpoint):
     )
 
     try:
+
         with urllib.request.urlopen(
             request,
             timeout=30
@@ -66,33 +68,35 @@ def supabase_request(endpoint):
             errors="replace"
         )
 
-        print("Supabase HTTP Error:", e.code)
-        print("Supabase response:", error_body)
+        print(
+            "Supabase HTTP Error:",
+            e.code
+        )
+
+        print(
+            "Supabase response:",
+            error_body
+        )
 
         raise
 
 
 # ==========================================
-# Get Symbol ID
+# Get Active Symbols
 # ==========================================
 
-def get_symbol_id():
+def get_active_symbols():
 
     params = urllib.parse.urlencode({
-        "symbol": f"eq.{SYMBOL}",
-        "limit": "1",
+        "exchange": f"eq.{EXCHANGE}",
+        "market_type": f"eq.{MARKET_TYPE}",
+        "status": "eq.TRADING",
+        "order": "symbol.asc",
     })
 
-    result = supabase_request(
+    return supabase_request(
         f"symbols?{params}"
     )
-
-    if not result:
-        raise RuntimeError(
-            f"Symbol {SYMBOL} not found."
-        )
-
-    return result[0]["id"]
 
 
 # ==========================================
@@ -237,7 +241,6 @@ def check_ohlc(candles):
 
             continue
 
-        # 價格必須大於 0
         if (
             open_price <= 0
             or high_price <= 0
@@ -252,7 +255,6 @@ def check_ohlc(candles):
 
             continue
 
-        # High 不應低於其他價格
         if high_price < max(
             open_price,
             close_price,
@@ -264,7 +266,6 @@ def check_ohlc(candles):
                 "reason": "Invalid high",
             })
 
-        # Low 不應高於其他價格
         if low_price > min(
             open_price,
             close_price,
@@ -276,12 +277,80 @@ def check_ohlc(candles):
                 "reason": "Invalid low",
             })
 
-        # Volume 不應為負
         if volume < 0:
 
             errors.append({
                 "open_time": candle["open_time"],
                 "reason": "Negative volume",
+            })
+
+    return errors
+
+
+# ==========================================
+# Check Time Alignment
+# ==========================================
+
+def check_time_alignment(
+    candles,
+    timeframe
+):
+
+    errors = []
+
+    for candle in candles:
+
+        dt = datetime.fromisoformat(
+            candle["open_time"].replace(
+                "Z",
+                "+00:00"
+            )
+        )
+
+        valid = True
+
+        if timeframe == "5m":
+
+            valid = (
+                dt.minute % 5 == 0
+                and dt.second == 0
+            )
+
+        elif timeframe == "15m":
+
+            valid = (
+                dt.minute % 15 == 0
+                and dt.second == 0
+            )
+
+        elif timeframe == "1h":
+
+            valid = (
+                dt.minute == 0
+                and dt.second == 0
+            )
+
+        elif timeframe == "4h":
+
+            valid = (
+                dt.hour % 4 == 0
+                and dt.minute == 0
+                and dt.second == 0
+            )
+
+        elif timeframe == "1d":
+
+            valid = (
+                dt.hour == 0
+                and dt.minute == 0
+                and dt.second == 0
+            )
+
+        if not valid:
+
+            errors.append({
+                "open_time": candle["open_time"],
+                "reason": "Invalid timeframe alignment",
             })
 
     return errors
@@ -294,6 +363,7 @@ def check_ohlc(candles):
 def check_latest_candle(candles):
 
     if not candles:
+
         return None
 
     latest = candles[-1]
@@ -310,9 +380,157 @@ def check_latest_candle(candles):
     )
 
     if close_time <= now:
+
         return "CLOSED"
 
     return "OPEN"
+
+
+# ==========================================
+# Check One Symbol
+# ==========================================
+
+def check_symbol(symbol_record):
+
+    symbol = symbol_record["symbol"]
+    symbol_id = symbol_record["id"]
+
+    print()
+    print("====================================")
+    print(f"SYMBOL: {symbol}")
+    print(f"Symbol ID: {symbol_id}")
+    print("====================================")
+
+    symbol_pass = True
+
+    for timeframe, minutes in TIMEFRAMES.items():
+
+        print("------------------------------------")
+        print(
+            f"Timeframe: {timeframe}"
+        )
+
+        candles = get_candles(
+            symbol_id,
+            timeframe
+        )
+
+        print(
+            f"Rows: {len(candles)}"
+        )
+
+        if not candles:
+
+            print("STATUS: NO DATA")
+
+            symbol_pass = False
+
+            continue
+
+        first_time = candles[0]["open_time"]
+        latest_time = candles[-1]["open_time"]
+
+        print(
+            f"First candle: {first_time}"
+        )
+
+        print(
+            f"Latest candle: {latest_time}"
+        )
+
+        duplicates = check_duplicates(
+            candles
+        )
+
+        gaps = check_time_gaps(
+            candles,
+            minutes
+        )
+
+        ohlc_errors = check_ohlc(
+            candles
+        )
+
+        alignment_errors = (
+            check_time_alignment(
+                candles,
+                timeframe
+            )
+        )
+
+        latest_status = (
+            check_latest_candle(
+                candles
+            )
+        )
+
+        print(
+            f"Duplicates: {duplicates}"
+        )
+
+        print(
+            f"Time gaps: {len(gaps)}"
+        )
+
+        print(
+            f"OHLC errors: "
+            f"{len(ohlc_errors)}"
+        )
+
+        print(
+            f"Alignment errors: "
+            f"{len(alignment_errors)}"
+        )
+
+        print(
+            f"Latest candle status: "
+            f"{latest_status}"
+        )
+
+        timeframe_pass = (
+            duplicates == 0
+            and len(gaps) == 0
+            and len(ohlc_errors) == 0
+            and len(alignment_errors) == 0
+        )
+
+        print(
+            f"Data quality: "
+            f"{'PASS' if timeframe_pass else 'CHECK'}"
+        )
+
+        if not timeframe_pass:
+
+            symbol_pass = False
+
+            for gap in gaps[:3]:
+
+                print(
+                    "  GAP:",
+                    gap
+                )
+
+            for error in ohlc_errors[:3]:
+
+                print(
+                    "  OHLC:",
+                    error
+                )
+
+            for error in alignment_errors[:3]:
+
+                print(
+                    "  ALIGNMENT:",
+                    error
+                )
+
+    print()
+    print(
+        f"{symbol} OVERALL: "
+        f"{'PASS' if symbol_pass else 'CHECK'}"
+    )
+
+    return symbol_pass
 
 
 # ==========================================
@@ -336,181 +554,76 @@ def main():
     )
 
     if not SUPABASE_URL:
+
         raise RuntimeError(
             "SUPABASE_URL is not configured."
         )
 
     if not SUPABASE_KEY:
+
         raise RuntimeError(
             "SUPABASE_KEY is not configured."
         )
 
-    print("Checking BTCUSDT...")
-
-    symbol_id = get_symbol_id()
+    symbols = get_active_symbols()
 
     print(
-        f"Symbol ID: {symbol_id}"
+        f"Active symbols: {len(symbols)}"
     )
 
-    overall_errors = False
+    if not symbols:
 
-    for timeframe, minutes in TIMEFRAMES.items():
-
-        print()
-        print("------------------------------------")
-        print(
-            f"Timeframe: {timeframe}"
+        raise RuntimeError(
+            "No active symbols found."
         )
 
-        candles = get_candles(
-            symbol_id,
-            timeframe
+    results = []
+
+    for symbol_record in symbols:
+
+        result = check_symbol(
+            symbol_record
         )
 
-        print(
-            f"Rows: {len(candles)}"
-        )
-
-        if not candles:
-
-            print("STATUS: NO DATA")
-
-            overall_errors = True
-
-            continue
-
-        # ----------------------------------
-        # Date range
-        # ----------------------------------
-
-        first_time = candles[0]["open_time"]
-        latest_time = candles[-1]["open_time"]
-
-        print(
-            f"First candle: {first_time}"
-        )
-
-        print(
-            f"Latest candle: {latest_time}"
-        )
-
-        # ----------------------------------
-        # Duplicate check
-        # ----------------------------------
-
-        duplicates = check_duplicates(
-            candles
-        )
-
-        print(
-            f"Duplicates: {duplicates}"
-        )
-
-        if duplicates > 0:
-            overall_errors = True
-
-        # ----------------------------------
-        # Gap check
-        # ----------------------------------
-
-        gaps = check_time_gaps(
-            candles,
-            minutes
-        )
-
-        print(
-            f"Time gaps: {len(gaps)}"
-        )
-
-        if gaps:
-
-            overall_errors = True
-
-            for gap in gaps[:5]:
-
-                print(
-                    "  GAP:",
-                    gap
-                )
-
-            if len(gaps) > 5:
-
-                print(
-                    f"  ... and "
-                    f"{len(gaps) - 5} more"
-                )
-
-        # ----------------------------------
-        # OHLC check
-        # ----------------------------------
-
-        ohlc_errors = check_ohlc(
-            candles
-        )
-
-        print(
-            f"OHLC errors: "
-            f"{len(ohlc_errors)}"
-        )
-
-        if ohlc_errors:
-
-            overall_errors = True
-
-            for error in ohlc_errors[:5]:
-
-                print(
-                    "  ERROR:",
-                    error
-                )
-
-            if len(ohlc_errors) > 5:
-
-                print(
-                    f"  ... and "
-                    f"{len(ohlc_errors) - 5} more"
-                )
-
-        # ----------------------------------
-        # Latest candle status
-        # ----------------------------------
-
-        latest_status = check_latest_candle(
-            candles
-        )
-
-        print(
-            f"Latest candle status: "
-            f"{latest_status}"
-        )
-
-        print(
-            f"Data quality: "
-            f"{'PASS' if not (
-                duplicates
-                or gaps
-                or ohlc_errors
-            ) else 'CHECK'}"
-        )
+        results.append({
+            "symbol": symbol_record["symbol"],
+            "pass": result,
+        })
 
     print()
     print("====================================")
+    print("FINAL SUMMARY")
+    print("====================================")
 
-    if overall_errors:
+    for result in results:
 
         print(
-            "OVERALL STATUS: CHECK REQUIRED"
+            f"{result['symbol']}: "
+            f"{'PASS' if result['pass'] else 'CHECK'}"
+        )
+
+    overall_pass = all(
+        result["pass"]
+        for result in results
+    )
+
+    print("------------------------------------")
+
+    if overall_pass:
+
+        print(
+            "OVERALL STATUS: PASS"
         )
 
     else:
 
         print(
-            "OVERALL STATUS: PASS"
+            "OVERALL STATUS: CHECK REQUIRED"
         )
 
     print("====================================")
 
 
 if __name__ == "__main__":
+
     main()
