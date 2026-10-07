@@ -22,24 +22,9 @@ if not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_KEY is not set")
 
 
-# =========================================================
-# IMPORTANT
-# =========================================================
-# True:
-#   完整重算並回補所有歷史 Feature
-#
-# False:
-#   正常增量模式，只處理最新 Feature
-#
-# 歷史回補完成後一定要改回 False。
-# =========================================================
-
+# True  = recalculate and write all historical features
+# False = incremental mode
 FORCE_HISTORICAL_BACKFILL = False
-
-
-# =========================================================
-# General configuration
-# =========================================================
 
 TIMEFRAMES = [
     "5m",
@@ -49,12 +34,13 @@ TIMEFRAMES = [
     "1d",
 ]
 
-WRITE_BATCH_SIZE = 500
 READ_PAGE_SIZE = 1000
+WRITE_BATCH_SIZE = 500
+PROGRESS_EVERY = 10000
 
 
 # =========================================================
-# Supabase HTTP helpers
+# Supabase HTTP
 # =========================================================
 
 def supabase_request(
@@ -85,7 +71,10 @@ def supabase_request(
     data = None
 
     if body is not None:
-        data = json.dumps(body).encode("utf-8")
+        data = json.dumps(
+            body,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
     request = urllib.request.Request(
         url,
@@ -132,26 +121,28 @@ def supabase_request(
 
 
 # =========================================================
-# Utility functions
+# Basic utilities
 # =========================================================
 
 def safe_float(value):
+
     if value is None:
         return None
 
     try:
-        x = float(value)
+        value = float(value)
 
-        if not math.isfinite(x):
+        if not math.isfinite(value):
             return None
 
-        return x
+        return value
 
     except (TypeError, ValueError):
         return None
 
 
 def iso_to_ms(value):
+
     if value is None:
         return None
 
@@ -176,46 +167,107 @@ def iso_to_ms(value):
 
 
 def ms_to_iso(ms):
-    dt = datetime.fromtimestamp(
+
+    return datetime.fromtimestamp(
         ms / 1000,
         tz=timezone.utc,
-    )
-
-    return dt.isoformat().replace(
+    ).isoformat().replace(
         "+00:00",
         "Z",
     )
 
 
-def is_finite(value):
-    if value is None:
-        return False
+def ratio(
+    numerator,
+    denominator,
+):
 
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError):
-        return False
-
-
-def clean_number(value):
-    value = safe_float(value)
-
-    if value is None:
+    if (
+        numerator is None
+        or denominator is None
+        or denominator == 0
+    ):
         return None
 
-    return value
+    return numerator / denominator
+
+
+def percent_change(
+    current,
+    previous,
+):
+
+    if (
+        current is None
+        or previous is None
+        or previous == 0
+    ):
+        return None
+
+    return (
+        current - previous
+    ) / abs(previous)
+
+
+def change_value(
+    series,
+    index,
+):
+
+    if index <= 0:
+        return None
+
+    current = series[index]
+    previous = series[index - 1]
+
+    if (
+        current is None
+        or previous is None
+    ):
+        return None
+
+    return current - previous
+
+
+def acceleration_value(
+    series,
+    index,
+):
+
+    if index < 2:
+        return None
+
+    current = series[index]
+    previous = series[index - 1]
+    previous_previous = series[index - 2]
+
+    if (
+        current is None
+        or previous is None
+        or previous_previous is None
+    ):
+        return None
+
+    return (
+        current
+        - 2 * previous
+        + previous_previous
+    )
 
 
 # =========================================================
-# Supabase table helpers
+# Supabase reads
 # =========================================================
 
 def get_active_symbols():
+
     rows = supabase_request(
         "GET",
         "/rest/v1/symbols",
         params={
-            "select": "id,symbol,market_type,status",
+            "select": (
+                "id,symbol,market_type,status"
+            ),
             "status": "eq.TRADING",
             "order": "symbol.asc",
         },
@@ -235,15 +287,8 @@ def get_all_candles(
     symbol_id,
     timeframe,
 ):
-    """
-    Read all candles for one symbol/timeframe.
-
-    Uses pagination because Supabase may limit
-    the number of returned rows.
-    """
 
     all_rows = []
-
     offset = 0
 
     while True:
@@ -265,7 +310,7 @@ def get_all_candles(
                 ),
                 "symbol_id": f"eq.{symbol_id}",
                 "timeframe": f"eq.{timeframe}",
-                "order": "open_time.desc",
+                "order": "open_time.asc",
                 "limit": READ_PAGE_SIZE,
                 "offset": offset,
             },
@@ -281,12 +326,6 @@ def get_all_candles(
 
         offset += READ_PAGE_SIZE
 
-    all_rows.sort(
-        key=lambda x: iso_to_ms(
-            x["open_time"]
-        )
-    )
-
     return all_rows
 
 
@@ -294,6 +333,7 @@ def get_latest_feature_timestamp(
     symbol_id,
     timeframe,
 ):
+
     rows = supabase_request(
         "GET",
         "/rest/v1/features",
@@ -318,31 +358,51 @@ def get_latest_feature_timestamp(
 # Candle parsing
 # =========================================================
 
-def parse_candles(rows):
+def parse_candles(
+    rows,
+    symbol_id,
+):
+
     candles = []
 
     for row in rows:
 
-        open_time = iso_to_ms(
-            row["open_time"]
-        )
-
-        close_time = iso_to_ms(
-            row["close_time"]
-        )
-
         candles.append(
             {
-                "open_time": open_time,
-                "close_time": close_time,
-                "open": safe_float(row["open"]),
-                "high": safe_float(row["high"]),
-                "low": safe_float(row["low"]),
-                "close": safe_float(row["close"]),
-                "volume": safe_float(row["volume"]),
+                "symbol_id": symbol_id,
+
+                "open_time": iso_to_ms(
+                    row["open_time"]
+                ),
+
+                "close_time": iso_to_ms(
+                    row["close_time"]
+                ),
+
+                "open": safe_float(
+                    row["open"]
+                ),
+
+                "high": safe_float(
+                    row["high"]
+                ),
+
+                "low": safe_float(
+                    row["low"]
+                ),
+
+                "close": safe_float(
+                    row["close"]
+                ),
+
+                "volume": safe_float(
+                    row["volume"]
+                ),
+
                 "quote_volume": safe_float(
                     row.get("quote_volume")
                 ),
+
                 "trade_count": (
                     int(row["trade_count"])
                     if row.get("trade_count") is not None
@@ -355,59 +415,177 @@ def parse_candles(rows):
 
 
 def is_closed_candle(candle):
+
     return (
         candle["close_time"]
         <= int(time.time() * 1000)
     )
+# =========================================================
+# Rolling calculations
+# =========================================================
+
+def rolling_mean(values, period):
+
+    result = [None] * len(values)
+
+    running_sum = 0.0
+    valid_count = 0
+
+    for i, value in enumerate(values):
+
+        if value is not None:
+            running_sum += value
+            valid_count += 1
+
+        if i >= period:
+
+            old_value = values[i - period]
+
+            if old_value is not None:
+                running_sum -= old_value
+                valid_count -= 1
+
+        if (
+            i >= period - 1
+            and valid_count == period
+        ):
+            result[i] = (
+                running_sum / period
+            )
+
+    return result
+
+
+def rolling_std(
+    values,
+    period,
+):
+
+    result = [None] * len(values)
+
+    for i in range(
+        period - 1,
+        len(values),
+    ):
+
+        window = values[
+            i - period + 1:
+            i + 1
+        ]
+
+        if any(
+            value is None
+            for value in window
+        ):
+            continue
+
+        average = (
+            sum(window) / period
+        )
+
+        variance = (
+            sum(
+                (value - average) ** 2
+                for value in window
+            )
+            / period
+        )
+
+        result[i] = math.sqrt(
+            variance
+        )
+
+    return result
+
+
+def rolling_max(
+    values,
+    period,
+):
+
+    result = [None] * len(values)
+
+    for i in range(
+        period - 1,
+        len(values),
+    ):
+
+        window = values[
+            i - period + 1:
+            i + 1
+        ]
+
+        if any(
+            value is None
+            for value in window
+        ):
+            continue
+
+        result[i] = max(window)
+
+    return result
+
+
+def rolling_min(
+    values,
+    period,
+):
+
+    result = [None] * len(values)
+
+    for i in range(
+        period - 1,
+        len(values),
+    ):
+
+        window = values[
+            i - period + 1:
+            i + 1
+        ]
+
+        if any(
+            value is None
+            for value in window
+        ):
+            continue
+
+        result[i] = min(window)
+
+    return result
 
 
 # =========================================================
-# Math helpers
+# EMA
 # =========================================================
 
-def mean(values):
-    values = [
-        x for x in values
-        if x is not None
-    ]
+def ema_series(
+    values,
+    period,
+):
 
-    if not values:
-        return None
-
-    return sum(values) / len(values)
-
-
-def sma(values, period):
-    if len(values) < period:
-        return None
-
-    window = values[-period:]
-
-    if any(x is None for x in window):
-        return None
-
-    return sum(window) / period
-
-
-def ema_series(values, period):
-    result = [
-        None
-        for _ in values
-    ]
+    result = [None] * len(values)
 
     if len(values) < period:
         return result
 
-    initial = values[:period]
+    first_window = values[:period]
 
-    if any(x is None for x in initial):
+    if any(
+        value is None
+        for value in first_window
+    ):
         return result
 
-    ema = sum(initial) / period
+    ema = (
+        sum(first_window)
+        / period
+    )
 
     result[period - 1] = ema
 
-    multiplier = 2.0 / (period + 1)
+    multiplier = (
+        2.0 / (period + 1)
+    )
 
     for i in range(
         period,
@@ -429,11 +607,16 @@ def ema_series(values, period):
     return result
 
 
-def rsi_series(values, period):
-    result = [
-        None
-        for _ in values
-    ]
+# =========================================================
+# RSI
+# =========================================================
+
+def rsi_series(
+    values,
+    period,
+):
+
+    result = [None] * len(values)
 
     if len(values) <= period:
         return result
@@ -441,31 +624,44 @@ def rsi_series(values, period):
     gains = []
     losses = []
 
-    for i in range(1, period + 1):
+    for i in range(
+        1,
+        period + 1,
+    ):
 
-        diff = (
+        difference = (
             values[i]
             - values[i - 1]
         )
 
         gains.append(
-            max(diff, 0)
+            max(difference, 0)
         )
 
         losses.append(
-            max(-diff, 0)
+            max(-difference, 0)
         )
 
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
+    average_gain = (
+        sum(gains) / period
+    )
 
-    if avg_loss == 0:
+    average_loss = (
+        sum(losses) / period
+    )
+
+    if average_loss == 0:
         result[period] = 100.0
     else:
-        rs = avg_gain / avg_loss
+        relative_strength = (
+            average_gain
+            / average_loss
+        )
+
         result[period] = (
             100
-            - 100 / (1 + rs)
+            - 100
+            / (1 + relative_strength)
         )
 
     for i in range(
@@ -473,37 +669,63 @@ def rsi_series(values, period):
         len(values),
     ):
 
-        diff = (
+        difference = (
             values[i]
             - values[i - 1]
         )
 
-        gain = max(diff, 0)
-        loss = max(-diff, 0)
+        gain = max(
+            difference,
+            0,
+        )
 
-        avg_gain = (
-            avg_gain * (period - 1)
+        loss = max(
+            -difference,
+            0,
+        )
+
+        average_gain = (
+            (
+                average_gain
+                * (period - 1)
+            )
             + gain
         ) / period
 
-        avg_loss = (
-            avg_loss * (period - 1)
+        average_loss = (
+            (
+                average_loss
+                * (period - 1)
+            )
             + loss
         ) / period
 
-        if avg_loss == 0:
+        if average_loss == 0:
             result[i] = 100.0
         else:
-            rs = avg_gain / avg_loss
+
+            relative_strength = (
+                average_gain
+                / average_loss
+            )
+
             result[i] = (
                 100
-                - 100 / (1 + rs)
+                - 100
+                / (1 + relative_strength)
             )
 
     return result
 
 
-def true_range_series(candles):
+# =========================================================
+# True Range / ATR
+# =========================================================
+
+def true_range_series(
+    candles,
+):
+
     result = []
 
     previous_close = None
@@ -513,474 +735,69 @@ def true_range_series(candles):
         high = candle["high"]
         low = candle["low"]
 
-        if high is None or low is None:
+        if (
+            high is None
+            or low is None
+        ):
+
             result.append(None)
+            previous_close = candle["close"]
             continue
 
         if previous_close is None:
 
-            tr = high - low
+            true_range = (
+                high - low
+            )
 
         else:
 
-            tr = max(
+            true_range = max(
                 high - low,
-                abs(high - previous_close),
-                abs(low - previous_close),
+                abs(
+                    high
+                    - previous_close
+                ),
+                abs(
+                    low
+                    - previous_close
+                ),
             )
 
-        result.append(tr)
+        result.append(
+            true_range
+        )
 
         previous_close = candle["close"]
 
     return result
 
 
-def atr_series(candles, period):
-    tr = true_range_series(candles)
+def atr_series(
+    candles,
+    period=14,
+):
+
+    true_ranges = (
+        true_range_series(
+            candles
+        )
+    )
 
     return ema_series(
-        tr,
+        true_ranges,
         period,
     )
-
-
-def standard_deviation(values):
-    values = [
-        x for x in values
-        if x is not None
-    ]
-
-    if not values:
-        return None
-
-    avg = sum(values) / len(values)
-
-    variance = sum(
-        (x - avg) ** 2
-        for x in values
-    ) / len(values)
-
-    return math.sqrt(variance)
-
-
-def stochastic_series(
-    candles,
-    period=14,
-    smooth=3,
-):
-    k_values = [
-        None
-        for _ in candles
-    ]
-
-    for i in range(
-        period - 1,
-        len(candles),
-    ):
-
-        window = candles[
-            i - period + 1:
-            i + 1
-        ]
-
-        highs = [
-            x["high"]
-            for x in window
-            if x["high"] is not None
-        ]
-
-        lows = [
-            x["low"]
-            for x in window
-            if x["low"] is not None
-        ]
-
-        if not highs or not lows:
-            continue
-
-        highest = max(highs)
-        lowest = min(lows)
-
-        close = candles[i]["close"]
-
-        if highest == lowest:
-            k = 50.0
-        else:
-            k = (
-                (close - lowest)
-                / (highest - lowest)
-                * 100
-            )
-
-        k_values[i] = k
-
-    d_values = [
-        None
-        for _ in candles
-    ]
-
-    for i in range(
-        smooth - 1,
-        len(k_values),
-    ):
-
-        window = k_values[
-            i - smooth + 1:
-            i + 1
-        ]
-
-        if any(
-            x is None
-            for x in window
-        ):
-            continue
-
-        d_values[i] = (
-            sum(window)
-            / smooth
-        )
-
-    return k_values, d_values
-
-
-def adx_series(
-    candles,
-    period=14,
-):
-    """
-    Simplified Wilder-style ADX calculation.
-    """
-
-    if len(candles) < period * 2:
-        return [
-            None
-            for _ in candles
-        ]
-
-    tr = []
-    plus_dm = []
-    minus_dm = []
-
-    for i in range(
-        len(candles)
-    ):
-
-        if i == 0:
-
-            tr.append(
-                candles[i]["high"]
-                - candles[i]["low"]
-            )
-
-            plus_dm.append(0.0)
-            minus_dm.append(0.0)
-            continue
-
-        high = candles[i]["high"]
-        low = candles[i]["low"]
-
-        prev_high = candles[i - 1]["high"]
-        prev_low = candles[i - 1]["low"]
-        prev_close = candles[i - 1]["close"]
-
-        current_tr = max(
-            high - low,
-            abs(high - prev_close),
-            abs(low - prev_close),
-        )
-
-        up_move = high - prev_high
-        down_move = prev_low - low
-
-        if (
-            up_move > down_move
-            and up_move > 0
-        ):
-            pdm = up_move
-        else:
-            pdm = 0.0
-
-        if (
-            down_move > up_move
-            and down_move > 0
-        ):
-            mdm = down_move
-        else:
-            mdm = 0.0
-
-        tr.append(current_tr)
-        plus_dm.append(pdm)
-        minus_dm.append(mdm)
-
-    atr = [
-        None
-        for _ in candles
-    ]
-
-    p_dm = [
-        None
-        for _ in candles
-    ]
-
-    m_dm = [
-        None
-        for _ in candles
-    ]
-
-    if len(candles) >= period:
-
-        atr[period - 1] = (
-            sum(tr[:period])
-            / period
-        )
-
-        p_dm[period - 1] = (
-            sum(plus_dm[:period])
-            / period
-        )
-
-        m_dm[period - 1] = (
-            sum(minus_dm[:period])
-            / period
-        )
-
-        for i in range(
-            period,
-            len(candles),
-        ):
-
-            atr[i] = (
-                (
-                    atr[i - 1]
-                    * (period - 1)
-                )
-                + tr[i]
-            ) / period
-
-            p_dm[i] = (
-                (
-                    p_dm[i - 1]
-                    * (period - 1)
-                )
-                + plus_dm[i]
-            ) / period
-
-            m_dm[i] = (
-                (
-                    m_dm[i - 1]
-                    * (period - 1)
-                )
-                + minus_dm[i]
-            ) / period
-
-    dx = [
-        None
-        for _ in candles
-    ]
-
-    for i in range(
-        len(candles)
-    ):
-
-        if (
-            atr[i] is None
-            or atr[i] == 0
-        ):
-            continue
-
-        plus_di = (
-            100
-            * p_dm[i]
-            / atr[i]
-        )
-
-        minus_di = (
-            100
-            * m_dm[i]
-            / atr[i]
-        )
-
-        denominator = (
-            plus_di
-            + minus_di
-        )
-
-        if denominator == 0:
-            dx[i] = 0.0
-        else:
-            dx[i] = (
-                100
-                * abs(
-                    plus_di
-                    - minus_di
-                )
-                / denominator
-            )
-
-    adx = [
-        None
-        for _ in candles
-    ]
-
-    valid_dx = [
-        x for x in dx
-        if x is not None
-    ]
-
-    if len(valid_dx) < period:
-        return adx
-
-    first_index = None
-
-    for i, value in enumerate(dx):
-        if value is not None:
-            first_index = i
-            break
-
-    if first_index is None:
-        return adx
-
-    initial_end = (
-        first_index + period
-    )
-
-    if initial_end > len(dx):
-        return adx
-
-    initial = dx[
-        first_index:
-        initial_end
-    ]
-
-    if any(
-        x is None
-        for x in initial
-    ):
-        return adx
-
-    current = (
-        sum(initial)
-        / period
-    )
-
-    adx[
-        initial_end - 1
-    ] = current
-
-    for i in range(
-        initial_end,
-        len(dx),
-    ):
-
-        if dx[i] is None:
-            continue
-
-        current = (
-            (
-                current
-                * (period - 1)
-            )
-            + dx[i]
-        ) / period
-
-        adx[i] = current
-
-    return adx
-
-
-# =========================================================
-# Feature helper functions
-# =========================================================
-
-def previous_value(
-    series,
-    index,
-):
-    if index <= 0:
-        return None
-
-    return series[index - 1]
-
-
-def change_value(
-    series,
-    index,
-):
-    if index <= 0:
-        return None
-
-    current = series[index]
-    previous = series[index - 1]
-
-    if current is None or previous is None:
-        return None
-
-    return current - previous
-
-
-def acceleration_value(
-    series,
-    index,
-):
-    if index < 2:
-        return None
-
-    current = series[index]
-    previous = series[index - 1]
-    previous_previous = series[index - 2]
-
-    if (
-        current is None
-        or previous is None
-        or previous_previous is None
-    ):
-        return None
-
-    return (
-        current
-        - 2 * previous
-        + previous_previous
-    )
-
-
-def ratio(
-    numerator,
-    denominator,
-):
-    if (
-        numerator is None
-        or denominator is None
-        or denominator == 0
-    ):
-        return None
-
-    return numerator / denominator
-
-
-def percent_change(
-    current,
-    previous,
-):
-    if (
-        current is None
-        or previous is None
-        or previous == 0
-    ):
-        return None
-
-    return (
-        current - previous
-    ) / abs(previous)
 
 
 # =========================================================
 # MACD
 # =========================================================
 
-def calculate_macd(
+def macd_series(
     closes,
 ):
+
     ema12 = ema_series(
         closes,
         12,
@@ -991,79 +808,44 @@ def calculate_macd(
         26,
     )
 
-    macd = [
-        None
-        for _ in closes
-    ]
+    macd = [None] * len(closes)
 
     for i in range(
         len(closes)
     ):
 
         if (
-            ema12[i] is None
-            or ema26[i] is None
+            ema12[i] is not None
+            and ema26[i] is not None
         ):
-            continue
 
-        macd[i] = (
-            ema12[i]
-            - ema26[i]
-        )
+            macd[i] = (
+                ema12[i]
+                - ema26[i]
+            )
 
-    valid_macd = [
-        x for x in macd
-        if x is not None
-    ]
-
-    signal_raw = ema_series(
-        valid_macd,
+    signal = ema_series(
+        macd,
         9,
     )
 
-    signal = [
-        None
-        for _ in closes
-    ]
-
-    valid_index = 0
-
-    for i in range(
-        len(closes)
-    ):
-
-        if macd[i] is None:
-            continue
-
-        if (
-            valid_index
-            < len(signal_raw)
-        ):
-            signal[i] = signal_raw[
-                valid_index
-            ]
-
-        valid_index += 1
-
-    histogram = [
-        None
-        for _ in closes
-    ]
+    histogram = [None] * len(
+        closes
+    )
 
     for i in range(
         len(closes)
     ):
 
         if (
-            macd[i] is None
-            or signal[i] is None
+            macd[i] is not None
+            and signal[i] is not None
         ):
-            continue
 
-        histogram[i] = (
-            macd[i]
-            - signal[i]
-        )
+            histogram[i] = (
+                macd[i]
+                - signal[i]
+            )
 
     return (
         macd,
@@ -1072,6 +854,354 @@ def calculate_macd(
     )
 
 
+# =========================================================
+# Stochastic
+# =========================================================
+
+def stochastic_series(
+    candles,
+    period=14,
+    smooth=3,
+):
+
+    highs = [
+        candle["high"]
+        for candle in candles
+    ]
+
+    lows = [
+        candle["low"]
+        for candle in candles
+    ]
+
+    closes = [
+        candle["close"]
+        for candle in candles
+    ]
+
+    highest = rolling_max(
+        highs,
+        period,
+    )
+
+    lowest = rolling_min(
+        lows,
+        period,
+    )
+
+    stochastic_k = [
+        None
+    ] * len(candles)
+
+    for i in range(
+        len(candles)
+    ):
+
+        if (
+            highest[i] is None
+            or lowest[i] is None
+        ):
+            continue
+
+        if (
+            highest[i]
+            == lowest[i]
+        ):
+
+            stochastic_k[i] = 50.0
+
+        else:
+
+            stochastic_k[i] = (
+                (
+                    closes[i]
+                    - lowest[i]
+                )
+                /
+                (
+                    highest[i]
+                    - lowest[i]
+                )
+                * 100
+            )
+
+    stochastic_d = rolling_mean(
+        stochastic_k,
+        smooth,
+    )
+
+    return (
+        stochastic_k,
+        stochastic_d,
+    )
+
+
+# =========================================================
+# ADX
+# =========================================================
+
+def adx_series(
+    candles,
+    period=14,
+):
+
+    count = len(candles)
+
+    result = [None] * count
+
+    if count < period * 2:
+        return result
+
+    true_ranges = [
+        0.0
+    ] * count
+
+    plus_dm = [
+        0.0
+    ] * count
+
+    minus_dm = [
+        0.0
+    ] * count
+
+    for i in range(count):
+
+        if i == 0:
+
+            true_ranges[i] = (
+                candles[i]["high"]
+                - candles[i]["low"]
+            )
+
+            continue
+
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+
+        previous_high = (
+            candles[i - 1]["high"]
+        )
+
+        previous_low = (
+            candles[i - 1]["low"]
+        )
+
+        previous_close = (
+            candles[i - 1]["close"]
+        )
+
+        true_ranges[i] = max(
+            high - low,
+            abs(
+                high
+                - previous_close
+            ),
+            abs(
+                low
+                - previous_close
+            ),
+        )
+
+        upward_move = (
+            high
+            - previous_high
+        )
+
+        downward_move = (
+            previous_low
+            - low
+        )
+
+        if (
+            upward_move
+            > downward_move
+            and upward_move > 0
+        ):
+
+            plus_dm[i] = (
+                upward_move
+            )
+
+        if (
+            downward_move
+            > upward_move
+            and downward_move > 0
+        ):
+
+            minus_dm[i] = (
+                downward_move
+            )
+
+    atr = [None] * count
+    smoothed_plus_dm = [
+        None
+    ] * count
+    smoothed_minus_dm = [
+        None
+    ] * count
+
+    atr[period - 1] = (
+        sum(
+            true_ranges[
+                :period
+            ]
+        )
+        / period
+    )
+
+    smoothed_plus_dm[
+        period - 1
+    ] = (
+        sum(
+            plus_dm[:period]
+        )
+        / period
+    )
+
+    smoothed_minus_dm[
+        period - 1
+    ] = (
+        sum(
+            minus_dm[:period]
+        )
+        / period
+    )
+
+    for i in range(
+        period,
+        count,
+    ):
+
+        atr[i] = (
+            (
+                atr[i - 1]
+                * (period - 1)
+            )
+            + true_ranges[i]
+        ) / period
+
+        smoothed_plus_dm[i] = (
+            (
+                smoothed_plus_dm[
+                    i - 1
+                ]
+                * (period - 1)
+            )
+            + plus_dm[i]
+        ) / period
+
+        smoothed_minus_dm[i] = (
+            (
+                smoothed_minus_dm[
+                    i - 1
+                ]
+                * (period - 1)
+            )
+            + minus_dm[i]
+        ) / period
+
+    dx = [None] * count
+
+    for i in range(
+        period - 1,
+        count,
+    ):
+
+        if (
+            atr[i] is None
+            or atr[i] == 0
+        ):
+            continue
+
+        plus_di = (
+            100
+            * smoothed_plus_dm[i]
+            / atr[i]
+        )
+
+        minus_di = (
+            100
+            * smoothed_minus_dm[i]
+            / atr[i]
+        )
+
+        denominator = (
+            plus_di
+            + minus_di
+        )
+
+        if denominator == 0:
+
+            dx[i] = 0.0
+
+        else:
+
+            dx[i] = (
+                100
+                * abs(
+                    plus_di
+                    - minus_di
+                )
+                / denominator
+            )
+
+    first_dx = None
+
+    for i, value in enumerate(dx):
+
+        if value is not None:
+
+            first_dx = i
+            break
+
+    if first_dx is None:
+        return result
+
+    if (
+        first_dx + period
+        > count
+    ):
+        return result
+
+    first_window = dx[
+        first_dx:
+        first_dx + period
+    ]
+
+    if any(
+        value is None
+        for value in first_window
+    ):
+        return result
+
+    current_adx = (
+        sum(first_window)
+        / period
+    )
+
+    result[
+        first_dx + period - 1
+    ] = current_adx
+
+    for i in range(
+        first_dx + period,
+        count,
+    ):
+
+        if dx[i] is None:
+            continue
+
+        current_adx = (
+            (
+                current_adx
+                * (period - 1)
+            )
+            + dx[i]
+        ) / period
+
+        result[i] = current_adx
+
+    return result
 # =========================================================
 # Feature calculation
 # =========================================================
@@ -1084,10 +1214,11 @@ def calculate_features(
     """
     Calculate all currently implemented features.
 
-    Important:
+    Rules:
     - only closed candles are used
-    - all indicators use data up to current candle
     - no future candle is used
+    - indicators are calculated sequentially
+    - Phase 2A-5 features are included
     """
 
     closed = [
@@ -1099,24 +1230,36 @@ def calculate_features(
     if not closed:
         return []
 
-    closes = [
-        x["close"]
-        for x in closed
-    ]
+    count = len(closed)
 
-    volumes = [
-        x["volume"]
-        for x in closed
+    print(
+        f"Building features: "
+        f"{symbol} {timeframe}"
+    )
+
+    print(
+        f"Closed candles available: "
+        f"{count}"
+    )
+
+    closes = [
+        candle["close"]
+        for candle in closed
     ]
 
     highs = [
-        x["high"]
-        for x in closed
+        candle["high"]
+        for candle in closed
     ]
 
     lows = [
-        x["low"]
-        for x in closed
+        candle["low"]
+        for candle in closed
+    ]
+
+    volumes = [
+        candle["volume"]
+        for candle in closed
     ]
 
     # -----------------------------------------------------
@@ -1125,76 +1268,63 @@ def calculate_features(
 
     returns = {}
 
-    for period in [
+    for period in (
         1,
         3,
         5,
         10,
-    ]:
+    ):
 
-        arr = [
+        result = [
             None
-            for _ in closes
+            for _ in range(count)
         ]
 
         for i in range(
             period,
-            len(closes),
+            count,
         ):
 
             previous = closes[
                 i - period
             ]
 
-            if previous == 0:
+            if (
+                previous is None
+                or previous == 0
+            ):
                 continue
 
-            arr[i] = (
+            result[i] = (
                 closes[i]
                 - previous
             ) / previous
 
-        returns[period] = arr
+        returns[period] = result
 
     # -----------------------------------------------------
     # Moving averages
     # -----------------------------------------------------
 
-    sma20 = [
-        sma(closes, 20)
-        if i >= 19
-        else None
-        for i in range(
-            len(closes)
-        )
-    ]
+    sma20 = rolling_mean(
+        closes,
+        20,
+    )
 
-    sma50 = [
-        sma(closes, 50)
-        if i >= 49
-        else None
-        for i in range(
-            len(closes)
-        )
-    ]
+    sma50 = rolling_mean(
+        closes,
+        50,
+    )
 
-    sma100 = [
-        sma(closes, 100)
-        if i >= 99
-        else None
-        for i in range(
-            len(closes)
-        )
-    ]
+    sma100 = rolling_mean(
+        closes,
+        100,
+    )
 
-    sma200 = [
-        sma(closes, 200)
-        if i >= 199
-        else None
-        for i in range(
-            len(closes)
-        )
-    ]
+    sma200 = rolling_mean(
+        closes,
+        200,
+    )
 
     ema20 = ema_series(
         closes,
@@ -1216,6 +1346,8 @@ def calculate_features(
         200,
     )
 
+    print("Moving averages calculated.")
+
     # -----------------------------------------------------
     # RSI
     # -----------------------------------------------------
@@ -1235,6 +1367,8 @@ def calculate_features(
         24,
     )
 
+    print("RSI calculated.")
+
     # -----------------------------------------------------
     # MACD
     # -----------------------------------------------------
@@ -1247,17 +1381,22 @@ def calculate_features(
         closes
     )
 
+    print("MACD calculated.")
+
     # -----------------------------------------------------
     # Stochastic
     # -----------------------------------------------------
 
-    stochastic_k, stochastic_d = (
-        stochastic_series(
-            closed,
-            14,
-            3,
-        )
+    (
+        stochastic_k,
+        stochastic_d,
+    ) = stochastic_series(
+        closed,
+        14,
+        3,
     )
+
+    print("Stochastic calculated.")
 
     # -----------------------------------------------------
     # ADX
@@ -1268,6 +1407,8 @@ def calculate_features(
         14,
     )
 
+    print("ADX calculated.")
+
     # -----------------------------------------------------
     # ATR
     # -----------------------------------------------------
@@ -1277,46 +1418,72 @@ def calculate_features(
         14,
     )
 
+    atr_percent = [
+        ratio(
+            atr[i],
+            closes[i],
+        )
+        for i in range(count)
+    ]
+
+    print("ATR calculated.")
+
     # -----------------------------------------------------
-    # Bollinger
+    # ATR MA20
+    # -----------------------------------------------------
+
+    atr_ma20 = rolling_mean(
+        atr,
+        20,
+    )
+
+    atr_to_atr_ma20 = [
+        ratio(
+            atr[i],
+            atr_ma20[i],
+        )
+        for i in range(count)
+    ]
+
+    # -----------------------------------------------------
+    # Bollinger Bands
     # -----------------------------------------------------
 
     bollinger_middle = sma20
 
+    bollinger_std = rolling_std(
+        closes,
+        20,
+    )
+
     bollinger_upper = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
     bollinger_lower = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
     bollinger_width = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
-    for i in range(
-        19,
-        len(closes),
-    ):
+    for i in range(count):
 
-        window = closes[
-            i - 19:
-            i + 1
-        ]
-
-        std = standard_deviation(
-            window
+        middle = (
+            bollinger_middle[i]
         )
 
-        middle = sma20[i]
+        std = (
+            bollinger_std[i]
+        )
 
         if (
-            std is None
-            or middle is None
+            middle is None
+            or std is None
         ):
             continue
 
@@ -1339,58 +1506,68 @@ def calculate_features(
                 upper - lower
             ) / middle
 
+    bollinger_width_ma20 = (
+        rolling_mean(
+            bollinger_width,
+            20,
+        )
+    )
+
+    print(
+        "Bollinger Bands calculated."
+    )
+
     # -----------------------------------------------------
-    # Volume MA
+    # Volume
     # -----------------------------------------------------
 
-    volume_ma = [
-        sma(volumes, 20)
-        if i >= 19
-        else None
-        for i in range(
-            len(volumes)
-        )
-    ]
+    volume_ma = rolling_mean(
+        volumes,
+        20,
+    )
 
     volume_ratio = [
         ratio(
             volumes[i],
             volume_ma[i],
         )
-        for i in range(
-            len(volumes)
-        )
+        for i in range(count)
     ]
 
     # -----------------------------------------------------
     # Price structure
+    #
+    # Important:
+    # Use PREVIOUS 20 candles.
+    # Current candle is excluded.
+    # This prevents look-ahead contamination.
     # -----------------------------------------------------
 
     support_price = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
     resistance_price = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
     distance_to_support = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
     distance_to_resistance = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
     structure_period = 20
 
     for i in range(
         structure_period,
-        len(closes),
+        count,
     ):
 
         previous_lows = lows[
@@ -1411,10 +1588,18 @@ def calculate_features(
             previous_highs
         )
 
-        support_price[i] = support
-        resistance_price[i] = resistance
+        support_price[i] = (
+            support
+        )
 
-        if closes[i] != 0:
+        resistance_price[i] = (
+            resistance
+        )
+
+        if (
+            closes[i] is not None
+            and closes[i] != 0
+        ):
 
             distance_to_support[i] = (
                 closes[i] - support
@@ -1425,91 +1610,449 @@ def calculate_features(
             ) / closes[i]
 
     # -----------------------------------------------------
-    # ATR MA20
+    # Phase 2A-5 precomputed changes
+    #
+    # IMPORTANT:
+    # Everything here is calculated once.
+    #
+    # The old implementation rebuilt the entire ATR%
+    # array inside every candle iteration.
+    # That created an O(n²) bottleneck.
     # -----------------------------------------------------
 
-    atr_ma20 = [
-        sma(
-            [
-                x
-                for x in atr[
-                    max(
-                        0,
-                        i - 19,
-                    ):
-                    i + 1
-                ]
-            ],
-            20,
+    rsi6_change = [
+        change_value(
+            rsi6,
+            i,
         )
-        if i >= 19
+        for i in range(count)
+    ]
+
+    rsi12_change = [
+        change_value(
+            rsi12,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    rsi24_change = [
+        change_value(
+            rsi24,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    rsi6_acceleration = [
+        acceleration_value(
+            rsi6,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    rsi12_acceleration = [
+        acceleration_value(
+            rsi12,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    rsi24_acceleration = [
+        acceleration_value(
+            rsi24,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    # -----------------------------------------------------
+    # MACD changes
+    # -----------------------------------------------------
+
+    macd_change = [
+        change_value(
+            macd,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    macd_signal_change = [
+        change_value(
+            macd_signal,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    macd_histogram_change = [
+        change_value(
+            macd_histogram,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    macd_acceleration = [
+        acceleration_value(
+            macd,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    macd_histogram_acceleration = [
+        acceleration_value(
+            macd_histogram,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    # -----------------------------------------------------
+    # ATR changes
+    # -----------------------------------------------------
+
+    atr_change = [
+        change_value(
+            atr,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    # FIX:
+    # Calculate ATR% once for the entire series.
+    # Do NOT rebuild it inside the candle loop.
+
+    atr_percent_change = [
+        change_value(
+            atr_percent,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    # -----------------------------------------------------
+    # Bollinger changes
+    # -----------------------------------------------------
+
+    bollinger_width_change = [
+        change_value(
+            bollinger_width,
+            i,
+        )
+        for i in range(count)
+    ]
+
+    bollinger_width_to_ma20 = [
+        ratio(
+            bollinger_width[i],
+            bollinger_width_ma20[i],
+        )
+        for i in range(count)
+    ]
+
+    # -----------------------------------------------------
+    # Trend ratios
+    # -----------------------------------------------------
+
+    price_sma20_ratio = [
+        ratio(
+            closes[i],
+            sma20[i],
+        )
+        for i in range(count)
+    ]
+
+    price_sma50_ratio = [
+        ratio(
+            closes[i],
+            sma50[i],
+        )
+        for i in range(count)
+    ]
+
+    price_sma100_ratio = [
+        ratio(
+            closes[i],
+            sma100[i],
+        )
+        for i in range(count)
+    ]
+
+    price_sma200_ratio = [
+        ratio(
+            closes[i],
+            sma200[i],
+        )
+        for i in range(count)
+    ]
+
+    price_ema20_ratio = [
+        ratio(
+            closes[i],
+            ema20[i],
+        )
+        for i in range(count)
+    ]
+
+    price_ema50_ratio = [
+        ratio(
+            closes[i],
+            ema50[i],
+        )
+        for i in range(count)
+    ]
+
+    price_ema100_ratio = [
+        ratio(
+            closes[i],
+            ema100[i],
+        )
+        for i in range(count)
+    ]
+
+    price_ema200_ratio = [
+        ratio(
+            closes[i],
+            ema200[i],
+        )
+        for i in range(count)
+    ]
+
+    # -----------------------------------------------------
+    # Moving average slopes
+    # -----------------------------------------------------
+
+    sma20_slope = [
+        percent_change(
+            sma20[i],
+            sma20[i - 1],
+        )
+        if i >= 1
         else None
-        for i in range(
-            len(atr)
+        for i in range(count)
+    ]
+
+    sma50_slope = [
+        percent_change(
+            sma50[i],
+            sma50[i - 1],
         )
+        if i >= 1
+        else None
+        for i in range(count)
+    ]
+
+    sma100_slope = [
+        percent_change(
+            sma100[i],
+            sma100[i - 1],
+        )
+        if i >= 1
+        else None
+        for i in range(count)
+    ]
+
+    sma200_slope = [
+        percent_change(
+            sma200[i],
+            sma200[i - 1],
+        )
+        if i >= 1
+        else None
+        for i in range(count)
+    ]
+
+    ema20_slope = [
+        percent_change(
+            ema20[i],
+            ema20[i - 1],
+        )
+        if i >= 1
+        else None
+        for i in range(count)
+    ]
+
+    ema50_slope = [
+        percent_change(
+            ema50[i],
+            ema50[i - 1],
+        )
+        if i >= 1
+        else None
+        for i in range(count)
+    ]
+
+    ema100_slope = [
+        percent_change(
+            ema100[i],
+            ema100[i - 1],
+        )
+        if i >= 1
+        else None
+        for i in range(count)
+    ]
+
+    ema200_slope = [
+        percent_change(
+            ema200[i],
+            ema200[i - 1],
+        )
+        if i >= 1
+        else None
+        for i in range(count)
     ]
 
     # -----------------------------------------------------
-    # Bollinger width MA20
+    # Trend alignment
     # -----------------------------------------------------
 
-    bollinger_width_ma20 = [
+    trend_alignment_score = [
         None
-        for _ in closes
+        for _ in range(count)
     ]
 
-    for i in range(
-        19,
-        len(closes),
-    ):
+    for i in range(count):
 
-        window = (
-            bollinger_width[
-                i - 19:
-                i + 1
-            ]
+        values = []
+
+        if (
+            closes[i] is not None
+            and sma20[i] is not None
+        ):
+
+            values.append(
+                1
+                if closes[i] > sma20[i]
+                else -1
+            )
+
+        if (
+            sma20[i] is not None
+            and sma50[i] is not None
+        ):
+
+            values.append(
+                1
+                if sma20[i] > sma50[i]
+                else -1
+            )
+
+        if (
+            sma50[i] is not None
+            and sma100[i] is not None
+        ):
+
+            values.append(
+                1
+                if sma50[i] > sma100[i]
+                else -1
+            )
+
+        if (
+            sma100[i] is not None
+            and sma200[i] is not None
+        ):
+
+            values.append(
+                1
+                if sma100[i] > sma200[i]
+                else -1
+            )
+
+        if values:
+
+            trend_alignment_score[i] = (
+                sum(values)
+                / len(values)
+            )
+
+    # -----------------------------------------------------
+    # Volatility regime
+    # -----------------------------------------------------
+
+    volatility_regime = [
+        None
+        for _ in range(count)
+    ]
+
+    for i in range(count):
+
+        value = (
+            atr_to_atr_ma20[i]
         )
 
-        if any(
-            x is None
-            for x in window
-        ):
+        if value is None:
             continue
 
-        bollinger_width_ma20[i] = (
-            sum(window) / 20
-        )
+        if value >= 1.2:
+
+            volatility_regime[i] = (
+                "VOLATILITY_EXPANSION"
+            )
+
+        elif value <= 0.8:
+
+            volatility_regime[i] = (
+                "VOLATILITY_CONTRACTION"
+            )
+
+        else:
+
+            volatility_regime[i] = (
+                "VOLATILITY_NORMAL"
+            )
+
+    print(
+        "Phase 2A-5 arrays calculated."
+    )
 
     # -----------------------------------------------------
     # Build feature rows
     # -----------------------------------------------------
 
     features = []
-    print(
-    f"Building feature rows: "
-    f"{len(closed)} candles"
-    )
+
     for i, candle in enumerate(
         closed
     ):
 
+        if (
+            i > 0
+            and i % PROGRESS_EVERY == 0
+        ):
+
+            print(
+                f"Feature progress: "
+                f"{i} / {count}"
+            )
+
         price = closes[i]
 
-        atr_value = atr[i]
-
-        atr_percent = ratio(
-            atr_value,
-            price,
+        candle_open = (
+            candle["open"]
         )
 
-        # ---------------------------------------------
-        # Candle structure
-        # ---------------------------------------------
+        candle_high = (
+            candle["high"]
+        )
 
-        candle_open = candle["open"]
-        candle_high = candle["high"]
-        candle_low = candle["low"]
-        candle_close = candle["close"]
+        candle_low = (
+            candle["low"]
+        )
+
+        candle_close = (
+            candle["close"]
+        )
+
+        # -------------------------------------------------
+        # Candle structure
+        # -------------------------------------------------
 
         candle_body = abs(
             candle_close
@@ -1534,343 +2077,12 @@ def calculate_features(
             - candle_low,
         )
 
-        # ---------------------------------------------
-        # Trend ratios
-        # ---------------------------------------------
-
-        price_sma20_ratio = ratio(
-            price,
-            sma20[i],
-        )
-
-        price_sma50_ratio = ratio(
-            price,
-            sma50[i],
-        )
-
-        price_sma100_ratio = ratio(
-            price,
-            sma100[i],
-        )
-
-        price_sma200_ratio = ratio(
-            price,
-            sma200[i],
-        )
-
-        price_ema20_ratio = ratio(
-            price,
-            ema20[i],
-        )
-
-        price_ema50_ratio = ratio(
-            price,
-            ema50[i],
-        )
-
-        price_ema100_ratio = ratio(
-            price,
-            ema100[i],
-        )
-
-        price_ema200_ratio = ratio(
-            price,
-            ema200[i],
-        )
-
-        # ---------------------------------------------
-        # Moving average slopes
-        # ---------------------------------------------
-
-        sma20_slope = (
-            percent_change(
-                sma20[i],
-                sma20[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        sma50_slope = (
-            percent_change(
-                sma50[i],
-                sma50[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        sma100_slope = (
-            percent_change(
-                sma100[i],
-                sma100[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        sma200_slope = (
-            percent_change(
-                sma200[i],
-                sma200[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        ema20_slope = (
-            percent_change(
-                ema20[i],
-                ema20[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        ema50_slope = (
-            percent_change(
-                ema50[i],
-                ema50[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        ema100_slope = (
-            percent_change(
-                ema100[i],
-                ema100[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        ema200_slope = (
-            percent_change(
-                ema200[i],
-                ema200[i - 1],
-            )
-            if i >= 1
-            else None
-        )
-
-        # ---------------------------------------------
-        # Trend alignment
-        # ---------------------------------------------
-
-        trend_values = []
-
-        if (
-            price is not None
-            and sma20[i] is not None
-        ):
-            trend_values.append(
-                1
-                if price > sma20[i]
-                else -1
-            )
-
-        if (
-            sma20[i] is not None
-            and sma50[i] is not None
-        ):
-            trend_values.append(
-                1
-                if sma20[i] > sma50[i]
-                else -1
-            )
-
-        if (
-            sma50[i] is not None
-            and sma100[i] is not None
-        ):
-            trend_values.append(
-                1
-                if sma50[i] > sma100[i]
-                else -1
-            )
-
-        if (
-            sma100[i] is not None
-            and sma200[i] is not None
-        ):
-            trend_values.append(
-                1
-                if sma100[i] > sma200[i]
-                else -1
-            )
-
-        if trend_values:
-
-            trend_alignment_score = (
-                sum(trend_values)
-                / len(trend_values)
-            )
-
-        else:
-            trend_alignment_score = None
-
-        # ---------------------------------------------
-        # RSI change / acceleration
-        # ---------------------------------------------
-
-        rsi6_change = change_value(
-            rsi6,
-            i,
-        )
-
-        rsi12_change = change_value(
-            rsi12,
-            i,
-        )
-
-        rsi24_change = change_value(
-            rsi24,
-            i,
-        )
-
-        rsi6_acceleration = (
-            acceleration_value(
-                rsi6,
-                i,
-            )
-        )
-
-        rsi12_acceleration = (
-            acceleration_value(
-                rsi12,
-                i,
-            )
-        )
-
-        rsi24_acceleration = (
-            acceleration_value(
-                rsi24,
-                i,
-            )
-        )
-
-        # ---------------------------------------------
-        # MACD change / acceleration
-        # ---------------------------------------------
-
-        macd_change = change_value(
-            macd,
-            i,
-        )
-
-        macd_signal_change = (
-            change_value(
-                macd_signal,
-                i,
-            )
-        )
-
-        macd_histogram_change = (
-            change_value(
-                macd_histogram,
-                i,
-            )
-        )
-
-        macd_acceleration = (
-            acceleration_value(
-                macd,
-                i,
-            )
-        )
-
-        macd_histogram_acceleration = (
-            acceleration_value(
-                macd_histogram,
-                i,
-            )
-        )
-
-        # ---------------------------------------------
-        # ATR changes
-        # ---------------------------------------------
-
-        atr_percent_change = None
-
-if i >= 1:
-    current_atr_percent = ratio(
-        atr[i],
-        closes[i],
-    )
-
-    previous_atr_percent = ratio(
-        atr[i - 1],
-        closes[i - 1],
-    )
-
-    if (
-        current_atr_percent is not None
-        and previous_atr_percent is not None
-        and previous_atr_percent != 0
-    ):
-        atr_percent_change = (
-            current_atr_percent
-            - previous_atr_percent
-        ) / abs(previous_atr_percent)
-
-        atr_to_atr_ma20 = ratio(
-            atr[i],
-            atr_ma20[i],
-        )
-
-        # ---------------------------------------------
-        # Bollinger changes
-        # ---------------------------------------------
-
-        bollinger_width_change = (
-            change_value(
-                bollinger_width,
-                i,
-            )
-        )
-
-        bollinger_width_to_ma20 = (
-            ratio(
-                bollinger_width[i],
-                bollinger_width_ma20[i],
-            )
-        )
-
-        # ---------------------------------------------
-        # Volatility regime
-        # ---------------------------------------------
-
-        volatility_regime = None
-
-        if (
-            atr_to_atr_ma20
-            is not None
-        ):
-
-            if atr_to_atr_ma20 >= 1.2:
-
-                volatility_regime = (
-                    "VOLATILITY_EXPANSION"
-                )
-
-            elif atr_to_atr_ma20 <= 0.8:
-
-                volatility_regime = (
-                    "VOLATILITY_CONTRACTION"
-                )
-
-            else:
-
-                volatility_regime = (
-                    "VOLATILITY_NORMAL"
-                )
-
-        # ---------------------------------------------
+        # -------------------------------------------------
         # Feature row
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         feature = {
+
             "symbol_id": candle.get(
                 "symbol_id"
             ),
@@ -1883,218 +2095,340 @@ if i >= 1:
 
             "price": price,
 
+            # ---------------------------------------------
             # Returns
+            # ---------------------------------------------
+
             "return_1": returns[1][i],
             "return_3": returns[3][i],
             "return_5": returns[5][i],
             "return_10": returns[10][i],
 
+            # ---------------------------------------------
             # SMA
+            # ---------------------------------------------
+
             "sma_20": sma20[i],
             "sma_50": sma50[i],
             "sma_100": sma100[i],
             "sma_200": sma200[i],
 
+            # ---------------------------------------------
             # EMA
+            # ---------------------------------------------
+
             "ema_20": ema20[i],
             "ema_50": ema50[i],
             "ema_100": ema100[i],
             "ema_200": ema200[i],
 
+            # ---------------------------------------------
             # RSI
+            # ---------------------------------------------
+
             "rsi_6": rsi6[i],
             "rsi_12": rsi12[i],
             "rsi_24": rsi24[i],
 
+            # ---------------------------------------------
             # MACD
+            # ---------------------------------------------
+
             "macd": macd[i],
             "macd_signal": macd_signal[i],
-            "macd_histogram": macd_histogram[i],
+            "macd_histogram": (
+                macd_histogram[i]
+            ),
 
+            # ---------------------------------------------
             # Stochastic
-            "stochastic_k": stochastic_k[i],
-            "stochastic_d": stochastic_d[i],
+            # ---------------------------------------------
 
+            "stochastic_k": (
+                stochastic_k[i]
+            ),
+
+            "stochastic_d": (
+                stochastic_d[i]
+            ),
+
+            # ---------------------------------------------
             # ADX
+            # ---------------------------------------------
+
             "adx": adx[i],
 
+            # ---------------------------------------------
             # ATR
-            "atr": atr_value,
-            "atr_percent": atr_percent,
+            # ---------------------------------------------
 
+            "atr": atr[i],
+
+            "atr_percent": (
+                atr_percent[i]
+            ),
+
+            # ---------------------------------------------
             # Bollinger
+            # ---------------------------------------------
+
             "bollinger_upper": (
                 bollinger_upper[i]
             ),
+
             "bollinger_middle": (
                 bollinger_middle[i]
             ),
+
             "bollinger_lower": (
                 bollinger_lower[i]
             ),
+
             "bollinger_width": (
                 bollinger_width[i]
             ),
 
+            # ---------------------------------------------
             # Volume
+            # ---------------------------------------------
+
             "volume": volumes[i],
-            "volume_ma": volume_ma[i],
-            "volume_ratio": volume_ratio[i],
 
-            # Candle
-            "candle_body": candle_body,
-            "upper_wick": upper_wick,
-            "lower_wick": lower_wick,
+            "volume_ma": (
+                volume_ma[i]
+            ),
 
-            # Structure
+            "volume_ratio": (
+                volume_ratio[i]
+            ),
+
+            # ---------------------------------------------
+            # Candle structure
+            # ---------------------------------------------
+
+            "candle_body": (
+                candle_body
+            ),
+
+            "upper_wick": (
+                upper_wick
+            ),
+
+            "lower_wick": (
+                lower_wick
+            ),
+
+            # ---------------------------------------------
+            # Price structure
+            # ---------------------------------------------
+
             "support_price": (
                 support_price[i]
             ),
+
             "resistance_price": (
                 resistance_price[i]
             ),
+
             "distance_to_support": (
                 distance_to_support[i]
             ),
+
             "distance_to_resistance": (
                 distance_to_resistance[i]
             ),
 
-            # Existing future/context fields
-            # These are intentionally left null
-            # until their dedicated pipelines
-            # are implemented.
+            # ---------------------------------------------
+            # Futures/context fields
+            #
+            # Dedicated pipelines will populate these
+            # later.
+            # ---------------------------------------------
+
             "funding_rate": None,
+
             "funding_rate_change": None,
+
             "open_interest": None,
+
             "open_interest_change": None,
+
             "basis": None,
 
             "btc_return": None,
+
             "btc_rsi": None,
+
             "btc_atr_percent": None,
+
             "btc_volume_ratio": None,
 
             "market_regime": None,
 
-            # -----------------------------------------
+            # ---------------------------------------------
             # Phase 2A-5
-            # -----------------------------------------
+            # ---------------------------------------------
 
             "price_sma20_ratio": (
-                price_sma20_ratio
+                price_sma20_ratio[i]
             ),
+
             "price_sma50_ratio": (
-                price_sma50_ratio
+                price_sma50_ratio[i]
             ),
+
             "price_sma100_ratio": (
-                price_sma100_ratio
+                price_sma100_ratio[i]
             ),
+
             "price_sma200_ratio": (
-                price_sma200_ratio
+                price_sma200_ratio[i]
             ),
 
             "price_ema20_ratio": (
-                price_ema20_ratio
+                price_ema20_ratio[i]
             ),
+
             "price_ema50_ratio": (
-                price_ema50_ratio
+                price_ema50_ratio[i]
             ),
+
             "price_ema100_ratio": (
-                price_ema100_ratio
+                price_ema100_ratio[i]
             ),
+
             "price_ema200_ratio": (
-                price_ema200_ratio
+                price_ema200_ratio[i]
             ),
 
-            "sma20_slope": sma20_slope,
-            "sma50_slope": sma50_slope,
-            "sma100_slope": sma100_slope,
-            "sma200_slope": sma200_slope,
+            "sma20_slope": (
+                sma20_slope[i]
+            ),
 
-            "ema20_slope": ema20_slope,
-            "ema50_slope": ema50_slope,
-            "ema100_slope": ema100_slope,
-            "ema200_slope": ema200_slope,
+            "sma50_slope": (
+                sma50_slope[i]
+            ),
+
+            "sma100_slope": (
+                sma100_slope[i]
+            ),
+
+            "sma200_slope": (
+                sma200_slope[i]
+            ),
+
+            "ema20_slope": (
+                ema20_slope[i]
+            ),
+
+            "ema50_slope": (
+                ema50_slope[i]
+            ),
+
+            "ema100_slope": (
+                ema100_slope[i]
+            ),
+
+            "ema200_slope": (
+                ema200_slope[i]
+            ),
 
             "trend_alignment_score": (
-                trend_alignment_score
+                trend_alignment_score[i]
             ),
 
-            "rsi6_change": rsi6_change,
-            "rsi12_change": rsi12_change,
-            "rsi24_change": rsi24_change,
+            "rsi6_change": (
+                rsi6_change[i]
+            ),
+
+            "rsi12_change": (
+                rsi12_change[i]
+            ),
+
+            "rsi24_change": (
+                rsi24_change[i]
+            ),
 
             "rsi6_acceleration": (
-                rsi6_acceleration
-            ),
-            "rsi12_acceleration": (
-                rsi12_acceleration
-            ),
-            "rsi24_acceleration": (
-                rsi24_acceleration
+                rsi6_acceleration[i]
             ),
 
-            "macd_change": macd_change,
-            "macd_signal_change": (
-                macd_signal_change
+            "rsi12_acceleration": (
+                rsi12_acceleration[i]
             ),
+
+            "rsi24_acceleration": (
+                rsi24_acceleration[i]
+            ),
+
+            "macd_change": (
+                macd_change[i]
+            ),
+
+            "macd_signal_change": (
+                macd_signal_change[i]
+            ),
+
             "macd_histogram_change": (
-                macd_histogram_change
+                macd_histogram_change[i]
             ),
 
             "macd_acceleration": (
-                macd_acceleration
-            ),
-            "macd_histogram_acceleration": (
-                macd_histogram_acceleration
+                macd_acceleration[i]
             ),
 
-            "atr_change": atr_change,
-            "atr_percent_change": (
-                atr_percent_change
+            "macd_histogram_acceleration": (
+                macd_histogram_acceleration[i]
             ),
-            "atr_ma20": atr_ma20[i],
+
+            "atr_change": (
+                atr_change[i]
+            ),
+
+            "atr_percent_change": (
+                atr_percent_change[i]
+            ),
+
+            "atr_ma20": (
+                atr_ma20[i]
+            ),
+
             "atr_to_atr_ma20": (
-                atr_to_atr_ma20
+                atr_to_atr_ma20[i]
             ),
 
             "bollinger_width_change": (
-                bollinger_width_change
+                bollinger_width_change[i]
             ),
+
             "bollinger_width_ma20": (
                 bollinger_width_ma20[i]
             ),
+
             "bollinger_width_to_ma20": (
-                bollinger_width_to_ma20
+                bollinger_width_to_ma20[i]
             ),
 
             "volatility_regime": (
-                volatility_regime
+                volatility_regime[i]
             ),
         }
-
-        # Remove None symbol_id if necessary.
-        feature["symbol_id"] = (
-            candle.get(
-                "symbol_id"
-            )
-        )
 
         features.append(
             feature
         )
 
+    print(
+        f"Feature calculation complete: "
+        f"{len(features)} rows"
+    )
+
     return features
-
-
 # =========================================================
 # Supabase Feature Upsert
 # =========================================================
 
-def supabase_upsert_features(
-    rows
-):
+def supabase_upsert_features(rows):
     if not rows:
         return 0
 
@@ -2119,7 +2453,7 @@ def supabase_upsert_features(
 
 
 # =========================================================
-# Process one symbol/timeframe
+# Process one symbol / timeframe
 # =========================================================
 
 def process_symbol_timeframe(
@@ -2129,11 +2463,21 @@ def process_symbol_timeframe(
     symbol_id = symbol["id"]
     symbol_name = symbol["symbol"]
 
+    print()
+    print(
+        "----------------------------------------"
+    )
     print(
         f"Processing: "
-        f"{symbol_name} "
-        f"{timeframe}"
+        f"{symbol_name} {timeframe}"
     )
+    print(
+        "----------------------------------------"
+    )
+
+    # -----------------------------------------------------
+    # Load candles
+    # -----------------------------------------------------
 
     rows = get_all_candles(
         symbol_id,
@@ -2141,11 +2485,9 @@ def process_symbol_timeframe(
     )
 
     if not rows:
-
         print(
             "No candles found."
         )
-
         return 0
 
     candles = parse_candles(
@@ -2168,16 +2510,24 @@ def process_symbol_timeframe(
     )
 
     if closed_count == 0:
-
         print(
             "No closed candles."
         )
-
         return 0
 
     # -----------------------------------------------------
-    # Calculate full historical feature set
+    # Calculate features
+    #
+    # We calculate the complete historical sequence
+    # because indicators such as EMA / RSI / ATR require
+    # previous candles.
+    #
+    # Phase 2A-5 has been rewritten so the expensive
+    # calculations are performed once instead of once
+    # per candle.
     # -----------------------------------------------------
+
+    start_time = time.time()
 
     features = calculate_features(
         candles,
@@ -2185,21 +2535,29 @@ def process_symbol_timeframe(
         timeframe,
     )
 
+    elapsed = (
+        time.time()
+        - start_time
+    )
+
     print(
         f"Calculated features: "
         f"{len(features)}"
     )
 
-    if not features:
+    print(
+        f"Calculation time: "
+        f"{elapsed:.2f} sec"
+    )
 
+    if not features:
         print(
             "No features calculated."
         )
-
         return 0
 
     # -----------------------------------------------------
-    # Normal incremental mode
+    # Incremental mode
     # -----------------------------------------------------
 
     if not FORCE_HISTORICAL_BACKFILL:
@@ -2213,14 +2571,52 @@ def process_symbol_timeframe(
 
         if latest_timestamp is not None:
 
-            features = [
-                row
-                for row in features
-                if iso_to_ms(
-                    row["timestamp"]
+            original_count = len(
+                features
+            )
+
+            filtered_features = []
+
+            for row in features:
+
+                row_timestamp = (
+                    iso_to_ms(
+                        row["timestamp"]
+                    )
                 )
-                > latest_timestamp
-            ]
+
+                if (
+                    row_timestamp
+                    > latest_timestamp
+                ):
+                    filtered_features.append(
+                        row
+                    )
+
+            features = filtered_features
+
+            print(
+                f"Existing features: "
+                f"{original_count - len(features)}"
+            )
+
+            print(
+                f"New features: "
+                f"{len(features)}"
+            )
+
+        else:
+
+            print(
+                "No existing features "
+                "found."
+            )
+
+            print(
+                f"Writing all "
+                f"{len(features)} "
+                f"historical features."
+            )
 
     # -----------------------------------------------------
     # Historical backfill mode
@@ -2228,6 +2624,7 @@ def process_symbol_timeframe(
 
     else:
 
+        print()
         print(
             "FORCE_HISTORICAL_BACKFILL=True"
         )
@@ -2237,10 +2634,10 @@ def process_symbol_timeframe(
             "feature set."
         )
 
-    print(
-        f"New features: "
-        f"{len(features)}"
-    )
+        print(
+            f"Historical features: "
+            f"{len(features)}"
+        )
 
     if not features:
 
@@ -2256,6 +2653,15 @@ def process_symbol_timeframe(
 
     total_written = 0
 
+    total_batches = (
+        (
+            len(features)
+            + WRITE_BATCH_SIZE
+            - 1
+        )
+        // WRITE_BATCH_SIZE
+    )
+
     for start in range(
         0,
         len(features),
@@ -2267,6 +2673,10 @@ def process_symbol_timeframe(
             start + WRITE_BATCH_SIZE
         ]
 
+        batch_number = (
+            start // WRITE_BATCH_SIZE
+        ) + 1
+
         written = (
             supabase_upsert_features(
                 batch
@@ -2277,16 +2687,21 @@ def process_symbol_timeframe(
 
         print(
             f"Batch "
-            f"{start // WRITE_BATCH_SIZE + 1}: "
+            f"{batch_number}/"
+            f"{total_batches}: "
             f"{written} rows | "
             f"Total: "
             f"{total_written}"
         )
 
+    print()
     print(
         f"Completed: "
         f"{symbol_name} "
-        f"{timeframe} | "
+        f"{timeframe}"
+    )
+
+    print(
         f"Written: "
         f"{total_written}"
     )
@@ -2311,6 +2726,10 @@ def main():
         "========================================"
     )
     print()
+
+    # -----------------------------------------------------
+    # Mode
+    # -----------------------------------------------------
 
     if FORCE_HISTORICAL_BACKFILL:
 
@@ -2337,6 +2756,10 @@ def main():
 
         print()
 
+    # -----------------------------------------------------
+    # Get active symbols
+    # -----------------------------------------------------
+
     symbols = get_active_symbols()
 
     if not symbols:
@@ -2354,15 +2777,23 @@ def main():
 
     print()
 
+    # -----------------------------------------------------
+    # Process all symbols / timeframes
+    # -----------------------------------------------------
+
     total_written = 0
+
     total_jobs = 0
+
     failed_jobs = 0
+
+    overall_start = time.time()
 
     for symbol in symbols:
 
-        symbol_name = symbol[
-            "symbol"
-        ]
+        symbol_name = (
+            symbol["symbol"]
+        )
 
         for timeframe in TIMEFRAMES:
 
@@ -2384,9 +2815,11 @@ def main():
                 failed_jobs += 1
 
                 print()
+                print(
+                    "ERROR:"
+                )
 
                 print(
-                    f"ERROR: "
                     f"{symbol_name} "
                     f"{timeframe}"
                 )
@@ -2398,32 +2831,66 @@ def main():
                 print()
 
                 # Continue with the next
-                # symbol/timeframe instead
-                # of terminating the entire job.
+                # symbol/timeframe.
                 continue
 
+    overall_elapsed = (
+        time.time()
+        - overall_start
+    )
+
+    # -----------------------------------------------------
+    # Final summary
+    # -----------------------------------------------------
+
     print()
+
     print(
         "========================================"
     )
+
     print(
         "FEATURE ENGINE COMPLETE"
     )
+
     print(
         "========================================"
     )
+
     print(
         f"Total jobs: "
         f"{total_jobs}"
     )
+
     print(
         f"Failed jobs: "
         f"{failed_jobs}"
     )
+
     print(
         f"Total written: "
         f"{total_written}"
     )
+
+    print(
+        f"Total runtime: "
+        f"{overall_elapsed:.2f} sec"
+    )
+
+    print()
+
+    if failed_jobs == 0:
+
+        print(
+            "OVERALL: PASS"
+        )
+
+    else:
+
+        print(
+            "OVERALL: FAIL"
+        )
+
     print()
 
 
