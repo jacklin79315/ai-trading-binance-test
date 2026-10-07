@@ -1,18 +1,38 @@
+import json
+import urllib.parse
 import urllib.request
 
-urls = [
-    "https://api.binance.com/api/v3/ping",
-    "https://data-api.binance.vision/api/v3/ping",
-]
 
-for url in urls:
-    print("\nTEST:", url)
+BASE_URL = "https://data-api.binance.vision/api/v3/klines"
 
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            body = response.read().decode("utf-8")
-            print("Status:", response.status)
-            print("Response:", body)
+params = {
+    "symbol": "BTCUSDT",
+    "interval": "5m",
+    "limit": 1000,
+}
 
-    except Exception as e:
-        print("FAILED:", repr(e))
+url = BASE_URL + "?" + urllib.parse.urlencode(params)
+
+print("Fetching Binance Kline data...")
+print("URL:", url)
+
+try:
+    with urllib.request.urlopen(url, timeout=20) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    print("\nSUCCESS")
+    print("Rows:", len(data))
+
+    if data:
+        print("\nFirst candle:")
+        print(data[0])
+
+        print("\nLast candle:")
+        print(data[-1])
+
+        print("\nLatest close price:")
+        print(data[-1][4])
+
+except Exception as e:
+    print("\nFAILED")
+    print("Error:", repr(e))
