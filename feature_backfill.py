@@ -17,16 +17,23 @@ HEADERS = {
 
 TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 
+# 每批寫入筆數
+BATCH_SIZE = 500
+
 
 # =========================================================
-# Supabase helpers
+# Supabase GET
 # =========================================================
 
 def supabase_get(table, params=None):
+
     url = f"{SUPABASE_URL}/rest/v1/{table}"
 
     if params:
-        url += "?" + urllib.parse.urlencode(params, doseq=True)
+        url += "?" + urllib.parse.urlencode(
+            params,
+            doseq=True
+        )
 
     req = urllib.request.Request(
         url,
@@ -34,32 +41,54 @@ def supabase_get(table, params=None):
         method="GET",
     )
 
-    with urllib.request.urlopen(req, timeout=60) as response:
-        return json.loads(response.read().decode())
+    with urllib.request.urlopen(
+        req,
+        timeout=60
+    ) as response:
+
+        return json.loads(
+            response.read().decode()
+        )
 
 
-def supabase_patch(table, filters, payload):
-    url = f"{SUPABASE_URL}/rest/v1/{table}?"
+# =========================================================
+# Supabase BATCH UPSERT
+# =========================================================
 
-    query = []
+def supabase_batch_upsert(rows):
 
-    for key, value in filters.items():
-        query.append(f"{key}=eq.{urllib.parse.quote(str(value), safe='')}")
+    if not rows:
+        return
 
-    url += "&".join(query)
+    url = (
+        f"{SUPABASE_URL}/rest/v1/features"
+        "?on_conflict=symbol_id,timeframe,timestamp"
+    )
 
-    patch_headers = dict(HEADERS)
-    patch_headers["Prefer"] = "return=minimal"
+    headers = dict(HEADERS)
+
+    headers["Prefer"] = (
+        "resolution=merge-duplicates,"
+        "return=minimal"
+    )
 
     req = urllib.request.Request(
         url,
-        headers=patch_headers,
-        data=json.dumps(payload).encode(),
-        method="PATCH",
+        headers=headers,
+        data=json.dumps(rows).encode(),
+        method="POST",
     )
 
-    with urllib.request.urlopen(req, timeout=60) as response:
-        return response.status
+    with urllib.request.urlopen(
+        req,
+        timeout=120
+    ) as response:
+
+        if response.status not in [200, 201]:
+            raise RuntimeError(
+                f"Supabase upsert failed: "
+                f"HTTP {response.status}"
+            )
 
 
 # =========================================================
@@ -67,13 +96,17 @@ def supabase_patch(table, filters, payload):
 # =========================================================
 
 def sma(values, period):
+
     result = [None] * len(values)
 
     if len(values) < period:
         return result
 
     for i in range(period - 1, len(values)):
-        window = values[i - period + 1:i + 1]
+
+        window = values[
+            i - period + 1:i + 1
+        ]
 
         if any(v is None for v in window):
             continue
@@ -84,6 +117,7 @@ def sma(values, period):
 
 
 def ema(values, period):
+
     result = [None] * len(values)
 
     valid_indices = [
@@ -96,22 +130,33 @@ def ema(values, period):
 
     seed_indices = valid_indices[:period]
 
-    if seed_indices[-1] != seed_indices[0] + period - 1:
+    if seed_indices[-1] != (
+        seed_indices[0] + period - 1
+    ):
         return result
 
-    seed = sum(values[i] for i in seed_indices) / period
+    seed = sum(
+        values[i]
+        for i in seed_indices
+    ) / period
 
     start = seed_indices[-1]
+
     result[start] = seed
 
     multiplier = 2 / (period + 1)
 
-    for i in range(start + 1, len(values)):
+    for i in range(
+        start + 1,
+        len(values)
+    ):
+
         if values[i] is None:
             continue
 
         result[i] = (
-            (values[i] - result[i - 1]) * multiplier
+            (values[i] - result[i - 1])
+            * multiplier
             + result[i - 1]
         )
 
@@ -119,6 +164,7 @@ def ema(values, period):
 
 
 def wilder_rsi(closes, period):
+
     result = [None] * len(closes)
 
     if len(closes) <= period:
@@ -128,41 +174,76 @@ def wilder_rsi(closes, period):
     losses = [0.0] * len(closes)
 
     for i in range(1, len(closes)):
-        change = closes[i] - closes[i - 1]
+
+        change = (
+            closes[i] - closes[i - 1]
+        )
 
         gains[i] = max(change, 0)
         losses[i] = max(-change, 0)
 
-    avg_gain = sum(gains[1:period + 1]) / period
-    avg_loss = sum(losses[1:period + 1]) / period
+    avg_gain = (
+        sum(gains[1:period + 1])
+        / period
+    )
+
+    avg_loss = (
+        sum(losses[1:period + 1])
+        / period
+    )
 
     if avg_loss == 0:
         result[period] = 100.0
     else:
-        rs = avg_gain / avg_loss
-        result[period] = 100 - (100 / (1 + rs))
 
-    for i in range(period + 1, len(closes)):
+        rs = avg_gain / avg_loss
+
+        result[period] = (
+            100 - 100 / (1 + rs)
+        )
+
+    for i in range(
+        period + 1,
+        len(closes)
+    ):
+
         avg_gain = (
-            (avg_gain * (period - 1) + gains[i])
+            (
+                avg_gain * (period - 1)
+                + gains[i]
+            )
             / period
         )
 
         avg_loss = (
-            (avg_loss * (period - 1) + losses[i])
+            (
+                avg_loss * (period - 1)
+                + losses[i]
+            )
             / period
         )
 
         if avg_loss == 0:
+
             result[i] = 100.0
+
         else:
+
             rs = avg_gain / avg_loss
-            result[i] = 100 - (100 / (1 + rs))
+
+            result[i] = (
+                100 - 100 / (1 + rs)
+            )
 
     return result
 
 
-def true_range(highs, lows, closes):
+def true_range(
+    highs,
+    lows,
+    closes
+):
+
     tr = [None] * len(closes)
 
     if not closes:
@@ -171,16 +252,29 @@ def true_range(highs, lows, closes):
     tr[0] = highs[0] - lows[0]
 
     for i in range(1, len(closes)):
+
         tr[i] = max(
             highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1]),
+
+            abs(
+                highs[i]
+                - closes[i - 1]
+            ),
+
+            abs(
+                lows[i]
+                - closes[i - 1]
+            ),
         )
 
     return tr
 
 
-def wilder_smoothing(values, period):
+def wilder_smoothing(
+    values,
+    period
+):
+
     result = [None] * len(values)
 
     valid = [
@@ -193,23 +287,31 @@ def wilder_smoothing(values, period):
 
     seed_indices = valid[:period]
 
-    if seed_indices[-1] != seed_indices[0] + period - 1:
+    if seed_indices[-1] != (
+        seed_indices[0] + period - 1
+    ):
         return result
 
     start = seed_indices[-1]
 
-    current = sum(
-        values[i] for i in seed_indices
-    ) / period
+    current = (
+        sum(values[i] for i in seed_indices)
+        / period
+    )
 
     result[start] = current
 
-    for i in range(start + 1, len(values)):
+    for i in range(
+        start + 1,
+        len(values)
+    ):
+
         if values[i] is None:
             continue
 
         current = (
-            current * (period - 1) + values[i]
+            current * (period - 1)
+            + values[i]
         ) / period
 
         result[i] = current
@@ -218,6 +320,7 @@ def wilder_smoothing(values, period):
 
 
 def standard_deviation(values):
+
     mean = sum(values) / len(values)
 
     variance = sum(
@@ -234,61 +337,85 @@ def standard_deviation(values):
 
 def calculate_features(candles):
 
-    opens = [float(x["open"]) for x in candles]
-    highs = [float(x["high"]) for x in candles]
-    lows = [float(x["low"]) for x in candles]
-    closes = [float(x["close"]) for x in candles]
-    volumes = [float(x["volume"]) for x in candles]
+    opens = [
+        float(x["open"])
+        for x in candles
+    ]
+
+    highs = [
+        float(x["high"])
+        for x in candles
+    ]
+
+    lows = [
+        float(x["low"])
+        for x in candles
+    ]
+
+    closes = [
+        float(x["close"])
+        for x in candles
+    ]
+
+    volumes = [
+        float(x["volume"])
+        for x in candles
+    ]
 
     n = len(candles)
 
-    result = []
-
-    # -----------------------------
+    # -----------------------------------------------------
     # Returns
-    # -----------------------------
+    # -----------------------------------------------------
 
     returns = {}
 
     for period in [1, 3, 5, 10]:
+
         arr = [None] * n
 
         for i in range(period, n):
+
             if closes[i - period] != 0:
+
                 arr[i] = (
-                    closes[i] /
-                    closes[i - period]
+                    closes[i]
+                    / closes[i - period]
                     - 1
                 )
 
         returns[period] = arr
 
-    # -----------------------------
-    # Moving averages
-    # -----------------------------
+    # -----------------------------------------------------
+    # SMA
+    # -----------------------------------------------------
 
     sma_values = {
         p: sma(closes, p)
         for p in [20, 50, 100, 200]
     }
 
+    # -----------------------------------------------------
+    # EMA
+    # -----------------------------------------------------
+
     ema_values = {
         p: ema(closes, p)
         for p in [20, 50, 100, 200]
     }
 
-    # -----------------------------
+    # -----------------------------------------------------
     # RSI
-    # -----------------------------
+    # -----------------------------------------------------
 
     rsi_values = {
         p: wilder_rsi(closes, p)
         for p in [6, 12, 24]
     }
 
-    # -----------------------------
+    # -----------------------------------------------------
     # MACD
-    # -----------------------------
+    # -----------------------------------------------------
 
     ema12 = ema(closes, 12)
     ema26 = ema(closes, 26)
@@ -296,51 +423,66 @@ def calculate_features(candles):
     macd = [None] * n
 
     for i in range(n):
+
         if (
             ema12[i] is not None
             and ema26[i] is not None
         ):
-            macd[i] = ema12[i] - ema26[i]
 
-    macd_signal = ema(macd, 9)
+            macd[i] = (
+                ema12[i] - ema26[i]
+            )
+
+    macd_signal = ema(
+        macd,
+        9
+    )
 
     macd_histogram = [None] * n
 
     for i in range(n):
+
         if (
             macd[i] is not None
             and macd_signal[i] is not None
         ):
+
             macd_histogram[i] = (
-                macd[i] - macd_signal[i]
+                macd[i]
+                - macd_signal[i]
             )
 
-    # -----------------------------
+    # -----------------------------------------------------
     # ATR
-    # -----------------------------
+    # -----------------------------------------------------
 
     tr = true_range(
         highs,
         lows,
-        closes,
+        closes
     )
 
-    atr = wilder_smoothing(tr, 14)
+    atr = wilder_smoothing(
+        tr,
+        14
+    )
 
     atr_percent = [None] * n
 
     for i in range(n):
+
         if (
             atr[i] is not None
             and closes[i] != 0
         ):
+
             atr_percent[i] = (
                 atr[i] / closes[i]
             )
 
-    # -----------------------------
-    # Bollinger Bands
-    # -----------------------------
+    # -----------------------------------------------------
+    # Bollinger
+    # -----------------------------------------------------
 
     bb_upper = [None] * n
     bb_middle = [None] * n
@@ -349,49 +491,69 @@ def calculate_features(candles):
 
     period = 20
 
-    for i in range(period - 1, n):
+    for i in range(
+        period - 1,
+        n
+    ):
 
         window = closes[
             i - period + 1:i + 1
         ]
 
-        middle = sum(window) / period
-        std = standard_deviation(window)
+        middle = (
+            sum(window)
+            / period
+        )
 
-        upper = middle + 2 * std
-        lower = middle - 2 * std
+        std = standard_deviation(
+            window
+        )
+
+        upper = (
+            middle + 2 * std
+        )
+
+        lower = (
+            middle - 2 * std
+        )
 
         bb_middle[i] = middle
         bb_upper[i] = upper
         bb_lower[i] = lower
 
         if middle != 0:
+
             bb_width[i] = (
                 (upper - lower)
                 / middle
             )
 
-    # -----------------------------
+    # -----------------------------------------------------
     # Volume
-    # -----------------------------
+    # -----------------------------------------------------
 
-    volume_ma = sma(volumes, 20)
+    volume_ma = sma(
+        volumes,
+        20
+    )
 
     volume_ratio = [None] * n
 
     for i in range(n):
+
         if (
             volume_ma[i] is not None
             and volume_ma[i] != 0
         ):
+
             volume_ratio[i] = (
-                volumes[i] /
-                volume_ma[i]
+                volumes[i]
+                / volume_ma[i]
             )
 
-    # -----------------------------
+    # -----------------------------------------------------
     # Candle structure
-    # -----------------------------
+    # -----------------------------------------------------
 
     candle_body = [None] * n
     upper_wick = [None] * n
@@ -399,25 +561,31 @@ def calculate_features(candles):
 
     for i in range(n):
 
-        body = abs(
+        candle_body[i] = abs(
             closes[i] - opens[i]
         )
 
-        candle_body[i] = body
-
         upper_wick[i] = (
             highs[i]
-            - max(opens[i], closes[i])
+            - max(
+                opens[i],
+                closes[i]
+            )
         )
 
         lower_wick[i] = (
-            min(opens[i], closes[i])
+            min(
+                opens[i],
+                closes[i]
+            )
             - lows[i]
         )
 
-    # -----------------------------
-    # Build feature rows
-    # -----------------------------
+    # -----------------------------------------------------
+    # Build rows
+    # -----------------------------------------------------
+
+    result = []
 
     for i, candle in enumerate(candles):
 
@@ -480,21 +648,26 @@ def calculate_features(candles):
 def main():
 
     print("=" * 60)
-    print("FEATURE BACKFILL")
+    print("FEATURE BACKFILL - BATCH VERSION")
     print("=" * 60)
 
     symbols = supabase_get(
         "symbols",
         {
-            "select": "id,symbol,exchange,market_type,status",
+            "select":
+                "id,symbol,exchange,market_type,status",
+
             "exchange": "eq.binance",
             "market_type": "eq.spot",
             "status": "eq.TRADING",
+
             "order": "symbol.asc",
         },
     )
 
-    print(f"Active symbols: {len(symbols)}")
+    print(
+        f"Active symbols: {len(symbols)}"
+    )
 
     total_updated = 0
 
@@ -511,7 +684,9 @@ def main():
         for timeframe in TIMEFRAMES:
 
             print()
-            print(f"{symbol_name} - {timeframe}")
+            print(
+                f"{symbol_name} - {timeframe}"
+            )
 
             # -------------------------------------------------
             # Load candles
@@ -521,15 +696,23 @@ def main():
                 "candles",
                 {
                     "select": "*",
-                    "symbol_id": f"eq.{symbol_id}",
-                    "timeframe": f"eq.{timeframe}",
-                    "order": "open_time.asc",
+
+                    "symbol_id":
+                        f"eq.{symbol_id}",
+
+                    "timeframe":
+                        f"eq.{timeframe}",
+
+                    "order":
+                        "open_time.asc",
+
                     "limit": "1000",
                 },
             )
 
             print(
-                f"Candles loaded: {len(candles)}"
+                f"Candles loaded: "
+                f"{len(candles)}"
             )
 
             if not candles:
@@ -537,7 +720,7 @@ def main():
                 continue
 
             # -------------------------------------------------
-            # Only closed candles
+            # Closed candles only
             # -------------------------------------------------
 
             now = datetime.now(
@@ -550,10 +733,14 @@ def main():
 
                 close_time = datetime.fromisoformat(
                     candle["close_time"]
-                    .replace("Z", "+00:00")
+                    .replace(
+                        "Z",
+                        "+00:00"
+                    )
                 )
 
                 if close_time <= now:
+
                     closed_candles.append(
                         candle
                     )
@@ -564,11 +751,13 @@ def main():
             )
 
             if not closed_candles:
-                print("No closed candles. Skip.")
+                print(
+                    "No closed candles. Skip."
+                )
                 continue
 
             # -------------------------------------------------
-            # Calculate features
+            # Calculate
             # -------------------------------------------------
 
             feature_rows = calculate_features(
@@ -581,43 +770,33 @@ def main():
             )
 
             # -------------------------------------------------
-            # Update existing rows
+            # Batch upsert
             # -------------------------------------------------
 
             updated = 0
 
-            for row in feature_rows:
+            for start in range(
+                0,
+                len(feature_rows),
+                BATCH_SIZE
+            ):
 
-                symbol_id_value = row["symbol_id"]
-                timeframe_value = row["timeframe"]
-                timestamp_value = row["timestamp"]
+                batch = feature_rows[
+                    start:
+                    start + BATCH_SIZE
+                ]
 
-                payload = {
-                    key: value
-                    for key, value in row.items()
-                    if key not in [
-                        "symbol_id",
-                        "timeframe",
-                        "timestamp",
-                    ]
-                }
-
-                supabase_patch(
-                    "features",
-                    {
-                        "symbol_id": symbol_id_value,
-                        "timeframe": timeframe_value,
-                        "timestamp": timestamp_value,
-                    },
-                    payload,
+                supabase_batch_upsert(
+                    batch
                 )
 
-                updated += 1
+                updated += len(batch)
 
-                if updated % 100 == 0:
-                    print(
-                        f"Updated: {updated}"
-                    )
+                print(
+                    f"Batch updated: "
+                    f"{updated}/"
+                    f"{len(feature_rows)}"
+                )
 
             print(
                 f"Updated rows: {updated}"
@@ -628,10 +807,14 @@ def main():
     print()
     print("=" * 60)
     print(
-        f"TOTAL UPDATED: {total_updated}"
+        f"TOTAL UPDATED: "
+        f"{total_updated}"
     )
     print("=" * 60)
-    print("Feature backfill completed.")
+
+    print(
+        "Feature backfill completed."
+    )
 
 
 if __name__ == "__main__":
