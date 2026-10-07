@@ -217,7 +217,7 @@ def main():
 
     total_inserted = 0
 
-    for timeframe in TIMEFRAMES:
+for timeframe in TIMEFRAMES:
     print("------------------------------------")
     print(f"Timeframe: {timeframe}")
 
