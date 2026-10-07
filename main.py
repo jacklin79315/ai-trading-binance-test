@@ -40,7 +40,7 @@ def supabase_request(method, path, data=None, params=None):
     }
 
     if method == "POST":
-        headers["Prefer"] = "return=representation"
+         headers["Prefer"] = "resolution=ignore-duplicates,return=representation"
 
     body = None
 
