@@ -34,7 +34,7 @@ if not SUPABASE_KEY:
 # 歷史回補完成後一定要改回 False。
 # =========================================================
 
-FORCE_HISTORICAL_BACKFILL = True
+FORCE_HISTORICAL_BACKFILL = False
 
 
 # =========================================================
