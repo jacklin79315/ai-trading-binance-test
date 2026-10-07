@@ -689,17 +689,6 @@ def main():
 
 
 if __name__ == "__main__":
-
     symbols = get_active_symbols()
-
-    btc = [
-        x
-        for x in symbols
-        if x["symbol"] == "BTCUSDT"
-    ][0]
-
-    backfill_one(
-        btc["symbol"],
-        btc["id"],
-        "5m",
-    )
+    btc = [x for x in symbols if x["symbol"] == "BTCUSDT"][0]
+    repair_gaps(btc["symbol"], btc["id"], "5m")
