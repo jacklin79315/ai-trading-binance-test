@@ -2491,12 +2491,12 @@ def process_symbol_timeframe(
         return 0
 
     candles = parse_candles(
-        rows
+        rows,
+        symbol_id,
     )
 
     # Add symbol_id to every candle
-    for candle in candles:
-        candle["symbol_id"] = symbol_id
+
 
     closed_count = sum(
         1
