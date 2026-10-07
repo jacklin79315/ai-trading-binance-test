@@ -1909,6 +1909,13 @@ def process_symbol_timeframe(
         )
     )
 
+    # =========================================================
+# Phase 2A-5 historical backfill
+# =========================================================
+# True  = 本次完整重算並回補歷史 Feature
+# False = 正常增量模式
+FORCE_HISTORICAL_BACKFILL = True
+
     if not FORCE_HISTORICAL_BACKFILL:
 
     if latest_timestamp is not None:
@@ -1916,10 +1923,8 @@ def process_symbol_timeframe(
         features = [
             row
             for row in features
-            if row["timestamp"]
-            > latest_timestamp
+            if row["timestamp"] > latest_timestamp
         ]
-
     print(
         f"New features: "
         f"{len(features)}"
