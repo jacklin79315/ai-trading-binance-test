@@ -1916,7 +1916,7 @@ def process_symbol_timeframe(
 # False = 正常增量模式
 FORCE_HISTORICAL_BACKFILL = True
 
-    if not FORCE_HISTORICAL_BACKFILL:
+if not FORCE_HISTORICAL_BACKFILL:
     if latest_timestamp is not None:
 
         features = [
