@@ -2,6 +2,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+import urllib.error
 
 
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
@@ -40,13 +41,18 @@ def supabase_request(method, path, data=None, params=None):
         method=method,
     )
 
+    try:
     with urllib.request.urlopen(request, timeout=20) as response:
         response_body = response.read().decode("utf-8")
-
         if response_body:
             return json.loads(response_body)
-
         return None
+
+except urllib.error.HTTPError as e:
+    error_body = e.read().decode("utf-8", errors="replace")
+    print("Supabase HTTP Error:", e.code)
+    print("Supabase response:", error_body)
+    raise
 
 
 def get_binance_klines():
