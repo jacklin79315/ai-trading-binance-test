@@ -21,7 +21,7 @@ HEADERS = {
 # ---------------------------------------------------------
 
 TARGET_DAYS = {
-    "5m": 365,
+    "5m": 30,
     "15m": 730,
     "1h": 1095,
     "4h": 1825,
@@ -458,4 +458,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    symbols = get_active_symbols()
+
+    btc = [
+        x for x in symbols
+        if x["symbol"] == "BTCUSDT"
+    ][0]
+
+    backfill_one(
+        btc["symbol"],
+        btc["id"],
+        "5m",
+    )
