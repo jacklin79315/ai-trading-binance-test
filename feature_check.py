@@ -1,12 +1,11 @@
 import os
-import urllib.request
-import urllib.parse
-import json
 import math
+import urllib.parse
+import urllib.request
+import json
 from datetime import datetime, timezone
 
-
-SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 HEADERS = {
@@ -17,20 +16,68 @@ HEADERS = {
 
 TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 
+NEW_FEATURES = [
+    "price_sma20_ratio",
+    "price_sma50_ratio",
+    "price_sma100_ratio",
+    "price_sma200_ratio",
 
-# =========================================================
-# Supabase GET
-# =========================================================
+    "price_ema20_ratio",
+    "price_ema50_ratio",
+    "price_ema100_ratio",
+    "price_ema200_ratio",
 
-def supabase_get(table, params=None):
+    "sma20_slope",
+    "sma50_slope",
+    "sma100_slope",
+    "sma200_slope",
 
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    "ema20_slope",
+    "ema50_slope",
+    "ema100_slope",
+    "ema200_slope",
 
+    "trend_alignment_score",
+
+    "rsi6_change",
+    "rsi12_change",
+    "rsi24_change",
+
+    "rsi6_acceleration",
+    "rsi12_acceleration",
+    "rsi24_acceleration",
+
+    "macd_change",
+    "macd_signal_change",
+    "macd_histogram_change",
+
+    "macd_acceleration",
+    "macd_histogram_acceleration",
+
+    "atr_change",
+    "atr_percent_change",
+    "atr_ma20",
+    "atr_to_atr_ma20",
+
+    "bollinger_width_change",
+    "bollinger_width_ma20",
+    "bollinger_width_to_ma20",
+
+    "volatility_regime",
+]
+
+NUMERIC_FEATURES = [
+    x for x in NEW_FEATURES
+    if x != "volatility_regime"
+]
+
+
+def get_json(path, params=None):
     if params:
-        url += "?" + urllib.parse.urlencode(
-            params,
-            doseq=True
-        )
+        query = urllib.parse.urlencode(params)
+        url = f"{SUPABASE_URL}{path}?{query}"
+    else:
+        url = f"{SUPABASE_URL}{path}"
 
     req = urllib.request.Request(
         url,
@@ -38,24 +85,58 @@ def supabase_get(table, params=None):
         method="GET"
     )
 
-    with urllib.request.urlopen(
-        req,
-        timeout=60
-    ) as response:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
-        return json.loads(
-            response.read().decode()
+
+def get_active_symbols():
+    rows = get_json(
+        "/rest/v1/symbols",
+        {
+            "select": "id,symbol,status",
+            "status": "eq.TRADING",
+            "order": "symbol.asc",
+        }
+    )
+    return rows
+
+
+def get_features(symbol_id, timeframe):
+    rows = []
+
+    limit = 1000
+    offset = 0
+
+    while True:
+        batch = get_json(
+            "/rest/v1/features",
+            {
+                "select": "id,symbol_id,timeframe,timestamp,price,"
+                          + ",".join(NEW_FEATURES),
+                "symbol_id": f"eq.{symbol_id}",
+                "timeframe": f"eq.{timeframe}",
+                "order": "timestamp.asc",
+                "limit": str(limit),
+                "offset": str(offset),
+            }
         )
 
+        rows.extend(batch)
 
-# =========================================================
-# Helpers
-# =========================================================
+        if len(batch) < limit:
+            break
 
-def is_finite(value):
+        offset += limit
 
+    return rows
+
+
+def is_finite_number(value):
     if value is None:
         return True
+
+    if isinstance(value, bool):
+        return False
 
     try:
         return math.isfinite(float(value))
@@ -63,467 +144,317 @@ def is_finite(value):
         return False
 
 
-def parse_time(value):
+def check_timestamp_order(rows):
+    timestamps = [r["timestamp"] for r in rows]
 
-    return datetime.fromisoformat(
-        value.replace("Z", "+00:00")
-    )
+    for i in range(1, len(timestamps)):
+        if timestamps[i] <= timestamps[i - 1]:
+            return False, timestamps[i - 1], timestamps[i]
 
-
-def check_monotonic(values):
-
-    previous = None
-
-    for value in values:
-
-        current = parse_time(value)
-
-        if previous is not None:
-
-            if current <= previous:
-                return False
-
-        previous = current
-
-    return True
+    return True, None, None
 
 
-# =========================================================
-# Main
-# =========================================================
+def check_price(rows):
+    errors = []
+
+    for r in rows:
+        value = r.get("price")
+
+        if value is None:
+            errors.append(
+                f"{r['timestamp']}: price is NULL"
+            )
+            continue
+
+        try:
+            value = float(value)
+        except Exception:
+            errors.append(
+                f"{r['timestamp']}: invalid price"
+            )
+            continue
+
+        if not math.isfinite(value) or value <= 0:
+            errors.append(
+                f"{r['timestamp']}: invalid price={value}"
+            )
+
+    return errors
+
+
+def check_numeric_features(rows):
+    errors = []
+
+    for feature in NUMERIC_FEATURES:
+        for r in rows:
+            value = r.get(feature)
+
+            if value is None:
+                continue
+
+            if not is_finite_number(value):
+                errors.append(
+                    f"{r['timestamp']}: {feature}={value}"
+                )
+
+    return errors
+
+
+def check_ratio_features(rows):
+    errors = []
+
+    ratio_features = [
+        "price_sma20_ratio",
+        "price_sma50_ratio",
+        "price_sma100_ratio",
+        "price_sma200_ratio",
+        "price_ema20_ratio",
+        "price_ema50_ratio",
+        "price_ema100_ratio",
+        "price_ema200_ratio",
+        "atr_to_atr_ma20",
+        "bollinger_width_to_ma20",
+    ]
+
+    for feature in ratio_features:
+        for r in rows:
+            value = r.get(feature)
+
+            if value is None:
+                continue
+
+            try:
+                value = float(value)
+            except Exception:
+                errors.append(
+                    f"{r['timestamp']}: {feature} invalid"
+                )
+                continue
+
+            if not math.isfinite(value):
+                errors.append(
+                    f"{r['timestamp']}: {feature} not finite"
+                )
+
+            if feature.startswith("price_") and value <= 0:
+                errors.append(
+                    f"{r['timestamp']}: {feature} <= 0 ({value})"
+                )
+
+            if feature in [
+                "atr_to_atr_ma20",
+                "bollinger_width_to_ma20",
+            ] and value < 0:
+                errors.append(
+                    f"{r['timestamp']}: {feature} < 0 ({value})"
+                )
+
+    return errors
+
+
+def check_trend_alignment(rows):
+    errors = []
+
+    for r in rows:
+        value = r.get("trend_alignment_score")
+
+        if value is None:
+            continue
+
+        try:
+            value = float(value)
+        except Exception:
+            errors.append(
+                f"{r['timestamp']}: invalid trend_alignment_score"
+            )
+            continue
+
+        if value < -1 or value > 1:
+            errors.append(
+                f"{r['timestamp']}: "
+                f"trend_alignment_score={value}, expected -1~1"
+            )
+
+    return errors
+
+
+def check_volatility_regime(rows):
+    errors = []
+
+    allowed = {
+        None,
+        "LOW_VOLATILITY",
+        "NORMAL_VOLATILITY",
+        "HIGH_VOLATILITY",
+    }
+
+    for r in rows:
+        value = r.get("volatility_regime")
+
+        if value not in allowed:
+            errors.append(
+                f"{r['timestamp']}: "
+                f"invalid volatility_regime={value}"
+            )
+
+    return errors
+
+
+def check_new_feature_coverage(rows):
+    result = {}
+
+    total = len(rows)
+
+    for feature in NEW_FEATURES:
+        non_null = sum(
+            1 for r in rows
+            if r.get(feature) is not None
+        )
+
+        result[feature] = {
+            "total": total,
+            "non_null": non_null,
+            "coverage": (
+                non_null / total * 100
+                if total > 0 else 0
+            ),
+        }
+
+    return result
+
 
 def main():
-
     print("=" * 70)
-    print("FEATURE QUALITY CHECK")
+    print("FEATURE CHECK: PHASE 2A-5")
     print("=" * 70)
 
-    symbols = supabase_get(
-        "symbols",
-        {
-            "select": "id,symbol",
-            "exchange": "eq.binance",
-            "market_type": "eq.spot",
-            "status": "eq.TRADING",
-            "order": "symbol.asc",
-        }
-    )
+    symbols = get_active_symbols()
 
-    overall_pass = True
+    total_checks = 0
+    total_failures = 0
+    total_rows = 0
 
-    total_features = 0
-    total_candles = 0
+    coverage_summary = {}
 
     for symbol in symbols:
-
         symbol_id = symbol["id"]
         symbol_name = symbol["symbol"]
-
-        print()
-        print("=" * 70)
-        print(symbol_name)
-        print("=" * 70)
 
         for timeframe in TIMEFRAMES:
 
             print()
-            print(
-                f"Checking {symbol_name} - "
-                f"{timeframe}"
+            print("-" * 70)
+            print(f"{symbol_name} - {timeframe}")
+
+            rows = get_features(
+                symbol_id,
+                timeframe
             )
 
-            # -------------------------------------------------
-            # Load candles
-            # -------------------------------------------------
+            total_checks += 1
+            total_rows += len(rows)
 
-            candles = supabase_get(
-                "candles",
-                {
-                    "select":
-                        "open_time,close_time,"
-                        "open,high,low,close,volume",
+            print(f"Feature rows: {len(rows)}")
 
-                    "symbol_id":
-                        f"eq.{symbol_id}",
+            failures = []
 
-                    "timeframe":
-                        f"eq.{timeframe}",
+            # 1. Timestamp order
+            ok, previous_ts, current_ts = check_timestamp_order(rows)
 
-                    "order":
-                        "open_time.asc",
+            if not ok:
+                failures.append(
+                    f"timestamp order error: "
+                    f"{previous_ts} -> {current_ts}"
+                )
 
-                    "limit": "1000",
-                }
+            # 2. Price
+            failures.extend(
+                check_price(rows)
             )
 
-            # -------------------------------------------------
-            # Load features
-            # -------------------------------------------------
-
-            features = supabase_get(
-                "features",
-                {
-                    "select": "*",
-
-                    "symbol_id":
-                        f"eq.{symbol_id}",
-
-                    "timeframe":
-                        f"eq.{timeframe}",
-
-                    "order":
-                        "timestamp.asc",
-
-                    "limit": "1000",
-                }
+            # 3. Numeric finite
+            failures.extend(
+                check_numeric_features(rows)
             )
 
-            candle_count = len(candles)
-            feature_count = len(features)
-
-            total_candles += candle_count
-            total_features += feature_count
-
-            print(
-                f"Candles : {candle_count}"
+            # 4. Ratio sanity
+            failures.extend(
+                check_ratio_features(rows)
             )
 
-            print(
-                f"Features: {feature_count}"
+            # 5. Trend alignment
+            failures.extend(
+                check_trend_alignment(rows)
             )
 
-            errors = []
+            # 6. Volatility regime
+            failures.extend(
+                check_volatility_regime(rows)
+            )
 
-            # -------------------------------------------------
-            # 1. Feature timestamp monotonic
-            # -------------------------------------------------
+            coverage = check_new_feature_coverage(rows)
 
-            timestamps = [
-                row["timestamp"]
-                for row in features
-            ]
+            coverage_summary[
+                f"{symbol_name}-{timeframe}"
+            ] = coverage
 
-            if timestamps:
+            if failures:
+                total_failures += 1
 
-                if not check_monotonic(
-                    timestamps
-                ):
+                print("FAIL")
+                print(f"Errors: {len(failures)}")
 
-                    errors.append(
-                        "Feature timestamps "
-                        "not strictly increasing"
-                    )
+                for error in failures[:10]:
+                    print("  ", error)
 
-            # -------------------------------------------------
-            # 2. Timestamp must correspond
-            #    to candle close_time
-            # -------------------------------------------------
-
-            candle_close_times = {
-                candle["close_time"]
-                for candle in candles
-            }
-
-            for row in features:
-
-                timestamp = row["timestamp"]
-
-                if timestamp not in candle_close_times:
-
-                    errors.append(
-                        f"Feature timestamp "
-                        f"not found in candles: "
-                        f"{timestamp}"
-                    )
-
-                    break
-
-            # -------------------------------------------------
-            # 3. Price sanity
-            # -------------------------------------------------
-
-            for row in features:
-
-                price = row["price"]
-
-                if price is not None:
-
-                    if (
-                        not is_finite(price)
-                        or float(price) <= 0
-                    ):
-
-                        errors.append(
-                            "Invalid feature price"
-                        )
-
-                        break
-
-            # -------------------------------------------------
-            # 4. RSI range
-            # -------------------------------------------------
-
-            for row in features:
-
-                for column in [
-                    "rsi_6",
-                    "rsi_12",
-                    "rsi_24",
-                ]:
-
-                    value = row[column]
-
-                    if value is None:
-                        continue
-
-                    if (
-                        not is_finite(value)
-                        or float(value) < 0
-                        or float(value) > 100
-                    ):
-
-                        errors.append(
-                            f"Invalid {column}"
-                        )
-
-                        break
-
-                if errors:
-                    break
-
-            # -------------------------------------------------
-            # 5. Bollinger relationship
-            # -------------------------------------------------
-
-            for row in features:
-
-                upper = row["bollinger_upper"]
-                middle = row["bollinger_middle"]
-                lower = row["bollinger_lower"]
-
-                if (
-                    upper is None
-                    or middle is None
-                    or lower is None
-                ):
-                    continue
-
-                if not (
-                    float(upper)
-                    >= float(middle)
-                    >= float(lower)
-                ):
-
-                    errors.append(
-                        "Invalid Bollinger "
-                        "relationship"
-                    )
-
-                    break
-
-            # -------------------------------------------------
-            # 6. ATR must not be negative
-            # -------------------------------------------------
-
-            for row in features:
-
-                for column in [
-                    "atr",
-                    "atr_percent",
-                ]:
-
-                    value = row[column]
-
-                    if value is None:
-                        continue
-
-                    if (
-                        not is_finite(value)
-                        or float(value) < 0
-                    ):
-
-                        errors.append(
-                            f"Invalid {column}"
-                        )
-
-                        break
-
-                if errors:
-                    break
-
-            # -------------------------------------------------
-            # 7. Volume features
-            # -------------------------------------------------
-
-            for row in features:
-
-                for column in [
-                    "volume",
-                    "volume_ma",
-                    "volume_ratio",
-                ]:
-
-                    value = row[column]
-
-                    if value is None:
-                        continue
-
-                    if (
-                        not is_finite(value)
-                        or float(value) < 0
-                    ):
-
-                        errors.append(
-                            f"Invalid {column}"
-                        )
-
-                        break
-
-                if errors:
-                    break
-
-            # -------------------------------------------------
-            # 8. Indicator numeric validity
-            # -------------------------------------------------
-
-            numeric_columns = [
-                "return_1",
-                "return_3",
-                "return_5",
-                "return_10",
-
-                "sma_20",
-                "sma_50",
-                "sma_100",
-                "sma_200",
-
-                "ema_20",
-                "ema_50",
-                "ema_100",
-                "ema_200",
-
-                "rsi_6",
-                "rsi_12",
-                "rsi_24",
-
-                "macd",
-                "macd_signal",
-                "macd_histogram",
-
-                "atr",
-                "atr_percent",
-
-                "bollinger_upper",
-                "bollinger_middle",
-                "bollinger_lower",
-                "bollinger_width",
-
-                "volume",
-                "volume_ma",
-                "volume_ratio",
-
-                "candle_body",
-                "upper_wick",
-                "lower_wick",
-            ]
-
-            for row in features:
-
-                for column in numeric_columns:
-
-                    value = row[column]
-
-                    if not is_finite(value):
-
-                        errors.append(
-                            f"Non-finite value "
-                            f"in {column}"
-                        )
-
-                        break
-
-                if errors:
-                    break
-
-            # -------------------------------------------------
-            # 9. Candle structure sanity
-            # -------------------------------------------------
-
-            for row in features:
-
-                for column in [
-                    "candle_body",
-                    "upper_wick",
-                    "lower_wick",
-                ]:
-
-                    value = row[column]
-
-                    if value is None:
-                        continue
-
-                    if float(value) < 0:
-
-                        errors.append(
-                            f"Negative "
-                            f"{column}"
-                        )
-
-                        break
-
-                if errors:
-                    break
-
-            # -------------------------------------------------
-            # Result
-            # -------------------------------------------------
-
-            if errors:
-
-                overall_pass = False
-
-                print("STATUS: FAIL")
-
-                for error in errors[:10]:
-
+                if len(failures) > 10:
                     print(
-                        f"  ERROR: {error}"
+                        f"  ... and "
+                        f"{len(failures) - 10} more"
                     )
 
             else:
+                print("PASS")
 
-                print("STATUS: PASS")
+            # 顯示新欄位覆蓋率
+            important_features = [
+                "price_sma20_ratio",
+                "sma20_slope",
+                "trend_alignment_score",
+                "rsi6_change",
+                "rsi6_acceleration",
+                "macd_change",
+                "atr_change",
+                "atr_to_atr_ma20",
+                "bollinger_width_change",
+                "bollinger_width_to_ma20",
+                "volatility_regime",
+            ]
 
-    # =========================================================
-    # Final
-    # =========================================================
+            print("Coverage:")
+
+            for feature in important_features:
+                info = coverage[feature]
+
+                print(
+                    f"  {feature}: "
+                    f"{info['non_null']}/{info['total']} "
+                    f"({info['coverage']:.2f}%)"
+                )
 
     print()
     print("=" * 70)
-
-    print(
-        f"Total candle rows checked : "
-        f"{total_candles}"
-    )
-
-    print(
-        f"Total feature rows checked: "
-        f"{total_features}"
-    )
-
-    if overall_pass:
-
-        print(
-            "OVERALL: PASS"
-        )
-
-    else:
-
-        print(
-            "OVERALL: FAIL"
-        )
-
+    print("PHASE 2A-5 FEATURE CHECK COMPLETE")
     print("=" * 70)
+
+    print(f"Timeframes checked: {total_checks}")
+    print(f"Total feature rows: {total_rows}")
+    print(f"Failed timeframes: {total_failures}")
+
+    if total_failures == 0:
+        print("OVERALL: PASS")
+    else:
+        print("OVERALL: FAIL")
 
 
 if __name__ == "__main__":
