@@ -283,9 +283,9 @@ def check_volatility_regime(rows):
 
     allowed = {
         None,
-        "LOW_VOLATILITY",
-        "NORMAL_VOLATILITY",
-        "HIGH_VOLATILITY",
+        "VOLATILITY_NORMAL",
+        "VOLATILITY_EXPANSION",
+        "VOLATILITY_CONTRACTION",
     }
 
     for r in rows:
