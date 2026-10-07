@@ -1,4 +1,5 @@
 import json
+import os
 import urllib.parse
 import urllib.request
 
@@ -61,22 +62,17 @@ def get_binance_klines():
 
 
 def main():
+
     symbol = "BTCUSDT"
     exchange = "binance"
     market_type = "spot"
 
-    # --------------------------------------------------
-    # 1. Binance
-    # --------------------------------------------------
-
+    # 1. 取得 Binance K 線
     klines = get_binance_klines()
 
     print("Binance rows:", len(klines))
 
-    # --------------------------------------------------
-    # 2. Find BTCUSDT in Supabase
-    # --------------------------------------------------
-
+    # 2. 查詢 Supabase 是否已經有 BTCUSDT
     print("Checking Supabase symbols...")
 
     existing = supabase_request(
@@ -91,10 +87,7 @@ def main():
         },
     )
 
-    # --------------------------------------------------
-    # 3. Create symbol if it doesn't exist
-    # --------------------------------------------------
-
+    # 3. 如果沒有 BTCUSDT，就建立
     if existing:
         symbol_id = existing[0]["id"]
         print("Existing symbol ID:", symbol_id)
@@ -119,10 +112,7 @@ def main():
 
         print("Created symbol ID:", symbol_id)
 
-    # --------------------------------------------------
-    # 4. Convert Binance candles
-    # --------------------------------------------------
-
+    # 4. 把 Binance 格式轉成 Supabase candles 格式
     candles = []
 
     for k in klines:
@@ -144,10 +134,7 @@ def main():
 
     print("Prepared candles:", len(candles))
 
-    # --------------------------------------------------
-    # 5. Write to Supabase
-    # --------------------------------------------------
-
+    # 5. 寫入 Supabase
     print("Writing candles to Supabase...")
 
     result = supabase_request(
