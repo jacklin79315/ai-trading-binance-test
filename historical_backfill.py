@@ -251,8 +251,6 @@ def convert_kline(kline, symbol_id, timeframe):
 
         "quote_volume": float(kline[7]),
         "trade_count": int(kline[8]),
-        "taker_buy_base_volume": float(kline[9]),
-        "taker_buy_quote_volume": float(kline[10]),
     }
 
 
