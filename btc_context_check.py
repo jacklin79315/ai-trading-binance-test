@@ -187,14 +187,6 @@ def check_timestamp_order(rows, timeframe):
 def check_timestamp_alignment(rows, timeframe):
     failures = []
 
-    expected_minutes = {
-        "5m": 5,
-        "15m": 15,
-        "1h": 60,
-        "4h": 240,
-        "1d": 1440,
-    }[timeframe]
-
     previous_dt = None
 
     for row in rows:
@@ -213,13 +205,58 @@ def check_timestamp_alignment(rows, timeframe):
             )
             continue
 
-        if dt.second != 0 or dt.microsecond != 0:
+        # Binance candle close_time normally ends at
+        # xx:xx:59.999 for minute-based intervals.
+        #
+        # Examples:
+        # 5m  -> 22:14:59.999
+        # 15m -> 22:29:59.999
+        # 1h  -> 22:59:59.999
+        # 4h  -> 23:59:59.999
+        # 1d  -> 23:59:59.999
+        #
+        # Therefore alignment must be checked against the
+        # END of the candle, not the beginning.
+
+        if dt.microsecond not in (0, 999000):
             failures.append(
-                f"{timeframe}: timestamp not minute-aligned: {timestamp}"
+                f"{timeframe}: unexpected microsecond "
+                f"{dt.microsecond} at {timestamp}"
             )
 
-        if timeframe in ("5m", "15m", "1h", "4h"):
-            if dt.minute % expected_minutes != 0:
+        if timeframe == "5m":
+            if dt.second != 59 or dt.minute % 5 != 4:
+                failures.append(
+                    f"{timeframe}: timestamp not aligned: {timestamp}"
+                )
+
+        elif timeframe == "15m":
+            if dt.second != 59 or dt.minute % 15 != 14:
+                failures.append(
+                    f"{timeframe}: timestamp not aligned: {timestamp}"
+                )
+
+        elif timeframe == "1h":
+            if dt.second != 59 or dt.minute != 59:
+                failures.append(
+                    f"{timeframe}: timestamp not aligned: {timestamp}"
+                )
+
+        elif timeframe == "4h":
+            if dt.second != 59 or dt.minute != 59:
+                failures.append(
+                    f"{timeframe}: timestamp not aligned: {timestamp}"
+                )
+
+            # 4h candles close at 03:59, 07:59, 11:59,
+            # 15:59, 19:59, 23:59 UTC.
+            if (dt.hour + 1) % 4 != 0:
+                failures.append(
+                    f"{timeframe}: timestamp not aligned: {timestamp}"
+                )
+
+        elif timeframe == "1d":
+            if dt.hour != 23 or dt.minute != 59 or dt.second != 59:
                 failures.append(
                     f"{timeframe}: timestamp not aligned: {timestamp}"
                 )
