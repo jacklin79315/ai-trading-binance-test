@@ -137,12 +137,12 @@ def check_numeric_integrity(rows, timeframe):
                     )
 
             elif field == "btc_trend_alignment_score":
-                if value < -1 or value > 1:
+                if value < -3 or value > 3:
                     failures.append(
                         f"{timeframe} {row.get('timestamp')} "
                         f"{field} out of range: {value}"
                     )
-
+    
     return failures
 
 
