@@ -362,24 +362,36 @@ def calculate_context(candles):
     ]
 
     sma20_slope = [None] * len(closes)
-    sma50_slope = [None] * len(closes)
-    sma200_slope = [None] * len(closes)
+sma50_slope = [None] * len(closes)
+sma200_slope = [None] * len(closes)
 
-    for i in range(1, len(closes)):
-        if sma20[i] is not None and sma20[i - 1] not in (None, 0):
-            sma20_slope[i] = (
-                sma20[i] - sma20[i - 1]
-            ) / sma20[i - 1]
+for i in range(5, len(closes)):
+    if (
+        sma20[i] is not None
+        and sma20[i - 5] is not None
+        and sma20[i - 5] != 0
+    ):
+        sma20_slope[i] = (
+            sma20[i] / sma20[i - 5]
+        ) - 1.0
 
-        if sma50[i] is not None and sma50[i - 1] not in (None, 0):
-            sma50_slope[i] = (
-                sma50[i] - sma50[i - 1]
-            ) / sma50[i - 1]
+    if (
+        sma50[i] is not None
+        and sma50[i - 5] is not None
+        and sma50[i - 5] != 0
+    ):
+        sma50_slope[i] = (
+            sma50[i] / sma50[i - 5]
+        ) - 1.0
 
-        if sma200[i] is not None and sma200[i - 1] not in (None, 0):
-            sma200_slope[i] = (
-                sma200[i] - sma200[i - 1]
-            ) / sma200[i - 1]
+    if (
+        sma200[i] is not None
+        and sma200[i - 5] is not None
+        and sma200[i - 5] != 0
+    ):
+        sma200_slope[i] = (
+            sma200[i] / sma200[i - 5]
+        ) - 1.0
 
     for i, candle in enumerate(candles):
         trend_alignment_score = None
