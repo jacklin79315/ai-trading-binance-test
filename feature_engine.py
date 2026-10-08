@@ -784,10 +784,46 @@ def atr_series(
         )
     )
 
-    return ema_series(
-        true_ranges,
-        period,
+    result = [None] * len(true_ranges)
+
+    if len(true_ranges) < period:
+        return result
+
+    first_window = true_ranges[:period]
+
+    if any(
+        value is None
+        for value in first_window
+    ):
+        return result
+
+    atr = (
+        sum(first_window)
+        / period
     )
+
+    result[period - 1] = atr
+
+    for i in range(
+        period,
+        len(true_ranges),
+    ):
+
+        value = true_ranges[i]
+
+        if value is None:
+            continue
+
+        atr = (
+            (atr * (period - 1))
+            + value
+        ) / period
+
+        result[i] = atr
+
+    print("ATR calculated.")
+
+    return result
 
 
 # =========================================================
