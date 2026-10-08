@@ -41,18 +41,36 @@ def get_btc_symbol_id():
     rows = supabase_get(
         "symbols",
         {
-            "select": "id",
+            "select": "id,symbol,market_type",
             "symbol": f"eq.{BTC_SYMBOL}",
-            "market_type": "eq.SPOT",
-            "limit": "1",
+            "limit": "10",
         },
     )
 
     if not rows:
-        raise RuntimeError("BTCUSDT SPOT symbol not found.")
+        raise RuntimeError(
+            "BTCUSDT symbol not found in symbols table."
+        )
 
-    return rows[0]["id"]
+    # 優先尋找 SPOT；若資料庫使用不同大小寫，
+    # 仍可正確找到 BTCUSDT 的現貨 symbol。
+    for row in rows:
+        market_type = str(row.get("market_type", "")).upper()
 
+        if market_type == "SPOT":
+            return row["id"]
+
+    # 如果沒有 SPOT，輸出實際資料，方便診斷
+    print("BTCUSDT found, but no SPOT market_type matched.")
+    print("Available rows:")
+
+    for row in rows:
+        print(row)
+
+    raise RuntimeError(
+        "BTCUSDT SPOT symbol not found. "
+        "See rows above for actual market_type."
+    )
 
 def get_context_rows(timeframe):
     return supabase_get(
