@@ -24,7 +24,7 @@ if not SUPABASE_KEY:
 
 # True  = recalculate and write all historical features
 # False = incremental mode
-FORCE_HISTORICAL_BACKFILL = True
+FORCE_HISTORICAL_BACKFILL = False
 
 TIMEFRAMES = [
     "5m",
