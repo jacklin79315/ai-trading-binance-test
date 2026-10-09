@@ -1,13 +1,12 @@
-
 import csv
 import io
+import json
 import os
 import zipfile
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
-
-from supabase import create_client
-
+from urllib.parse import urlencode
+from urllib.error import HTTPError
 
 # ============================================================
 # Phase 2B-2: Futures Funding Rate Historical Backfill
@@ -43,6 +42,40 @@ def require_environment():
         )
 
 
+def supabase_request(method, table, params=None, payload=None, prefer=None):
+    url = SUPABASE_URL.rstrip("/") + "/rest/v1/" + table
+
+    if params:
+        url += "?" + urlencode(params, doseq=True)
+
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    if prefer:
+        headers["Prefer"] = prefer
+
+    request = Request(url, data=data, headers=headers, method=method)
+
+    try:
+        with urlopen(request, timeout=60) as response:
+            raw = response.read()
+            if not raw:
+                return []
+            return json.loads(raw.decode("utf-8"))
+    except HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        print("Supabase HTTP Error:", exc.code)
+        print("Supabase response:", error_body)
+        raise
+
+
 def download_csv():
     print(f"Downloading: {ZIP_URL}")
 
@@ -68,27 +101,28 @@ def download_csv():
         with archive.open(csv_files[0]) as file:
             content = file.read().decode("utf-8-sig")
 
-    reader = csv.DictReader(io.StringIO(content))
+        reader = csv.DictReader(io.StringIO(content))
 
-    required_columns = {
-        "calc_time",
-        "funding_interval_hours",
-        "last_funding_rate",
-    }
+        required_columns = {
+            "calc_time",
+            "funding_interval_hours",
+            "last_funding_rate",
+        }
 
-    if not reader.fieldnames or not required_columns.issubset(
-        set(reader.fieldnames)
-    ):
-        raise RuntimeError(
-            f"Unexpected CSV columns: {reader.fieldnames}"
-        )
+        if not reader.fieldnames or not required_columns.issubset(
+            set(reader.fieldnames)
+        ):
+            raise RuntimeError(
+                f"Unexpected CSV columns: {reader.fieldnames}"
+            )
 
-    return list(reader)
+        return list(reader)
 
 
 def normalize_rows(csv_rows, symbol_id):
     result = []
     seen_timestamps = set()
+    invalid_interval_count = 0
 
     for line_number, row in enumerate(csv_rows, start=2):
         try:
@@ -97,6 +131,7 @@ def normalize_rows(csv_rows, symbol_id):
             funding_rate = row["last_funding_rate"].strip()
 
             if interval_hours <= 0:
+                invalid_interval_count += 1
                 raise ValueError("Invalid funding interval")
 
             # Keep the original rate as a decimal string to avoid
@@ -140,6 +175,7 @@ def normalize_rows(csv_rows, symbol_id):
         raise RuntimeError("No funding rate rows found")
 
     result.sort(key=lambda item: item["funding_time"])
+    print(f"funding_interval_hours invalid rows: {invalid_interval_count}")
     return result
 
 
@@ -153,18 +189,16 @@ def main():
     print(f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE WRITE'}")
     print("=" * 60)
 
-    client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-    symbol_result = (
-        client.table("symbols")
-        .select("id, symbol, market_type, status")
-        .eq("exchange", "binance")
-        .eq("symbol", SYMBOL)
-        .eq("market_type", "futures")
-        .execute()
+    symbols = supabase_request(
+        "GET",
+        "symbols",
+        params={
+            "select": "id,symbol,market_type,status",
+            "exchange": "eq.binance",
+            "symbol": f"eq.{SYMBOL}",
+            "market_type": "eq.futures",
+        },
     )
-
-    symbols = symbol_result.data or []
 
     if len(symbols) != 1:
         raise RuntimeError(
@@ -201,13 +235,12 @@ def main():
     for start in range(0, len(rows), BATCH_SIZE):
         batch = rows[start:start + BATCH_SIZE]
 
-        (
-            client.table("funding_rates")
-            .upsert(
-                batch,
-                on_conflict="symbol_id,funding_time",
-            )
-            .execute()
+        supabase_request(
+            "POST",
+            "funding_rates",
+            params={"on_conflict": "symbol_id,funding_time"},
+            payload=batch,
+            prefer="resolution=merge-duplicates,return=minimal",
         )
 
         inserted_batches += 1
