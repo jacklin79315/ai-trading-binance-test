@@ -14,7 +14,7 @@ from urllib.error import HTTPError
 # Default: DRY RUN (does not write to Supabase)
 # ============================================================
 
-SYMBOL = "BTCUSDT"
+SYMBOL = "ETHUSDT"
 MONTH = "2026-09"
 
 DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() != "false"
